@@ -1,0 +1,25 @@
+# Render.com — bot de clima (Telegram) 24/7
+# Dashboard: New → Blueprint → este repo
+# Luego pega las Environment Variables (secrets) a mano.
+services:
+  - type: web
+    name: clima-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: WINDBORNE_API_KEY
+        sync: false
+      - key: TOMORROW_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: VISUALCROSSING_KEY
+        sync: false
+      - key: XAI_API_KEY
+        sync: false

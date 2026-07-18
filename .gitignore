@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+config_local.py
+*.log
+.env
+.DS_Store
+*.csv
+gridpoint.txt
