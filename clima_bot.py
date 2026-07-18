@@ -604,7 +604,7 @@ def _mediana(vals):
 
 
 def _filtrar_7timer_outlier(datos):
-    """Omite 7Timer si supera la mediana de otros modelos en mas de 2°F."""
+    """Marca 7Timer si es outlier, pero LO DEJA en el promedio (el user quiere 8 fuentes)."""
     st = datos.get("seven_timer")
     if st is None:
         return
@@ -614,16 +614,13 @@ def _filtrar_7timer_outlier(datos):
     if len(otros) < 2:
         return
     med = _mediana(otros)
-    # Solo omitir si se va mucho (antes 2°F era muy agresivo y dejaba "sin datos")
-    if st > med + max(SEVEN_TIMER_OUTLIER_MAX, 3.0):
+    if st > med + 4.0:
         diff = round(st - med, 1)
         print(
-            f"  [seven_timer] omitido outlier: {st}F "
-            f"(mediana {med}F, +{diff}F)"
+            f"  [seven_timer] outlier +{diff}F vs mediana {med}F "
+            f"(se mantiene en el promedio)"
         )
-        datos["seven_timer_raw"] = st
-        datos["seven_timer"] = None
-        _SOURCE_CACHE.pop("seven_timer", None)
+        datos["seven_timer_note"] = f"outlier +{diff}°F"
 
 
 def _linea_modelo(fuente, datos):
