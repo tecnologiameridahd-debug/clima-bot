@@ -2581,6 +2581,14 @@ def handle_command(comando, chat_id):
             return
         return
 
+    if comando in ["/rapido", "rapido", "/rápido", "rápido"]:
+        try:
+            datos = recolectar_datos()
+            enviar_telegram(chat_id, resumen_desde_datos(datos))
+        except Exception as e:
+            print(f"Error /rapido: {e}")
+            enviar_telegram(chat_id, f"❌ Error al obtener datos: {e}", parse_mode=None)
+        return
     if comando in ["/all", "all", "/clima", "clima", "🌤 /all"]:
         enviar_telegram(chat_id, "⏳ Recolectando modelos…", parse_mode=None)
         try:
