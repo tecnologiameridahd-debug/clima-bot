@@ -675,8 +675,7 @@ def _pie_cobertura_all(datos):
     extra_gemini = len(FUENTES_GEMINI_ONLY)
     return (
         f"📊 <i>{activas}/{TOTAL_FUENTES_ALL} fuentes · "
-        f"{modelo_txt} · {n_traders}/{n_trader_tot} traders · +{extra_gemini} con /gemini</i>\n"
-        f"<i>WindBorne opcional (trial API off)</i>"
+        f"{modelo_txt} · {n_traders}/{n_trader_tot} traders · +{extra_gemini} con /gemini</i>"
     )
 
 
@@ -2215,16 +2214,7 @@ def resumen_desde_datos(datos):
     total_posibles = len(FUENTES_UNIDAS)
     con_valor = {k for _, v, k in items if v is not None}
 
-    fb = datos.get("_fallback") or {}
-    lineas = []
-    for nombre, val, key in items:
-        if val is None:
-            continue
-        nota = fb.get(key)
-        if nota:
-            lineas.append(f"• {nombre}: {val}°F <i>({nota})</i>")
-        else:
-            lineas.append(f"• {nombre}: {val}°F")
+    lineas = [f"• {nombre}: {val}°F" for nombre, val, _ in items if val is not None]
     for fuente in FUENTES_UNIDAS:
         if fuente not in con_valor:
             lineas.append(f"• {_nombre_fuente_unida(fuente)}: sin datos")
@@ -2236,7 +2226,7 @@ def resumen_desde_datos(datos):
 
 {chr(10).join(lineas)}
 
-📊 <i>8 fuentes Denver (WindBorne off) · si una API falla se rellena con consenso</i>
+📊 <i>Un solo promedio de todos los pronósticos (sin KDEN/CLI)</i>
 /monitor on"""
 
 
