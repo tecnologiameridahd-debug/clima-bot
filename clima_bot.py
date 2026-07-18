@@ -68,7 +68,8 @@ GEMINI_FALLBACK_MODELS = (
 )
 
 NWS_HEADERS = {
-    "User-Agent": "AlbertoWeatherBot (tu_email@ejemplo.com)",
+    # NWS exige un User-Agent identificable (no de ejemplo genérico)
+    "User-Agent": "GasRadarClimaBot/1.1 (contact@gasradarapp.com)",
     "Accept": "application/geo+json",
 }
 
@@ -538,48 +539,57 @@ def get_7timer():
     cached = _cache_get("seven_timer")
     if cached is not None:
         return cached
-    try:
-        url = "http://www.7timer.info/bin/api.pl"
-        params = {"lon": LON, "lat": LAT, "product": "civil", "output": "json"}
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        payload = r.json()
-        series = payload["dataseries"]
+    # Render a veces bloquea http:// — probar https y http
+    urls = (
+        "https://www.7timer.info/bin/api.pl",
+        "http://www.7timer.info/bin/api.pl",
+    )
+    last_err = None
+    for url in urls:
+        try:
+            params = {"lon": LON, "lat": LAT, "product": "civil", "output": "json"}
+            r = requests.get(url, params=params, timeout=18)
+            r.raise_for_status()
+            payload = r.json()
+            series = payload.get("dataseries") or []
+            if not series:
+                continue
 
-        objetivo = fecha_objetivo_denver()
-        init_str = payload.get("init")
-        if init_str:
-            init_denver = datetime.strptime(init_str, "%Y%m%d%H").replace(
-                tzinfo=ZoneInfo("UTC")
-            ).astimezone(DENVER_TZ)
-        else:
-            init_denver = datetime.now(DENVER_TZ)
+            objetivo = fecha_objetivo_denver()
+            init_str = payload.get("init")
+            if init_str:
+                init_denver = datetime.strptime(init_str, "%Y%m%d%H").replace(
+                    tzinfo=ZoneInfo("UTC")
+                ).astimezone(DENVER_TZ)
+            else:
+                init_denver = datetime.now(DENVER_TZ)
 
-        # timepoint = horas desde init del modelo (UTC en campo init)
-        temps_c = []
-        for d in series:
-            momento = init_denver + timedelta(hours=d["timepoint"])
-            if momento.strftime("%Y-%m-%d") == objetivo:
-                temps_c.append(d["temp2m"])
+            # timepoint = horas desde init del modelo
+            temps_c = []
+            for d in series:
+                momento = init_denver + timedelta(hours=int(d.get("timepoint") or 0))
+                if momento.strftime("%Y-%m-%d") == objetivo:
+                    t = d.get("temp2m")
+                    if t is not None:
+                        temps_c.append(float(t))
 
-        # Tarde/noche: quedan muy pocas horas de hoy → no es maximo diario fiable
-        if len(temps_c) < 3:
-            print(f"  [seven_timer] omitido: solo {len(temps_c)} puntos hoy")
-            return None
+            # Con 1+ puntos ya estimamos max del día (antes exigía 3 y de noche salía vacío)
+            if not temps_c:
+                print(f"  [seven_timer] sin puntos para {objetivo}")
+                continue
 
-        valor = c_to_f(max(temps_c))
-
-        # Si KDEN ya supero este valor, 7timer quedo desactualizado
-        kden = _cache_get("kden", OFFICIAL_CACHE_TTL)
-        if kden is not None and valor < kden - 1.5:
-            print(f"  [seven_timer] omitido: {valor}F < KDEN {kden}F")
-            return None
-
-        _cache_set("seven_timer", valor)
-        return valor
-    except Exception as e:
-        print(f"  [seven_timer] ERROR: {e}")
-        return None
+            valor = c_to_f(max(temps_c))
+            _cache_set("seven_timer", valor)
+            return valor
+        except Exception as e:
+            last_err = e
+            continue
+    print(f"  [seven_timer] ERROR: {last_err}")
+    stale = _SOURCE_CACHE.get("seven_timer")
+    if stale and stale.get("valor") is not None:
+        print(f"  [seven_timer] usando cache: {stale['valor']}F")
+        return stale["valor"]
+    return None
 
 
 def _mediana(vals):
@@ -601,10 +611,11 @@ def _filtrar_7timer_outlier(datos):
     otros = [
         datos.get(f) for f in FUENTES_CONSENSO_7TIMER if datos.get(f) is not None
     ]
-    if len(otros) < 3:
+    if len(otros) < 2:
         return
     med = _mediana(otros)
-    if st > med + SEVEN_TIMER_OUTLIER_MAX:
+    # Solo omitir si se va mucho (antes 2°F era muy agresivo y dejaba "sin datos")
+    if st > med + max(SEVEN_TIMER_OUTLIER_MAX, 3.0):
         diff = round(st - med, 1)
         print(
             f"  [seven_timer] omitido outlier: {st}F "
@@ -886,27 +897,51 @@ def get_nws_zone_max():
         r = requests.get(
             f"https://api.weather.gov/points/{LAT},{LON}",
             headers=NWS_HEADERS,
-            timeout=10,
+            timeout=15,
         )
         r.raise_for_status()
         forecast_url = r.json()["properties"]["forecast"]
-        r2 = requests.get(forecast_url, headers=NWS_HEADERS, timeout=12)
+        r2 = requests.get(forecast_url, headers=NWS_HEADERS, timeout=15)
         r2.raise_for_status()
         objetivo = fecha_objetivo_denver()
         temps = []
-        for period in r2.json()["properties"]["periods"]:
+        temps_by_name = []
+        for period in r2.json().get("properties", {}).get("periods") or []:
             if not period.get("isDaytime"):
                 continue
+            name = (period.get("name") or "").lower()
             start = datetime.fromisoformat(period["startTime"]).astimezone(DENVER_TZ)
+            t = period.get("temperature")
+            if t is None:
+                continue
+            t = float(t)
+            # 1) Periodos diurnos que empiezan hoy
             if start.strftime("%Y-%m-%d") == objetivo:
-                temps.append(float(period["temperature"]))
-        if not temps:
+                temps.append(t)
+            # 2) Nombres típicos NWS
+            if name in ("today", "this afternoon", "rest of today") or name.startswith(
+                "today"
+            ):
+                temps_by_name.append(t)
+        pool = temps or temps_by_name
+        if not pool:
+            # 3) Fallback: primer periodo diurno del forecast
+            for period in r2.json().get("properties", {}).get("periods") or []:
+                if period.get("isDaytime") and period.get("temperature") is not None:
+                    pool = [float(period["temperature"])]
+                    print("  [nws_zone] fallback primer diurno del forecast")
+                    break
+        if not pool:
+            print("  [nws_zone] sin periodos diurnos")
             return None
-        valor = round(max(temps), 1)
+        valor = round(max(pool), 1)
         _cache_set("nws_zone", valor)
         return valor
     except Exception as e:
         print(f"  [nws_zone] ERROR: {e}")
+        stale = _SOURCE_CACHE.get("nws_zone")
+        if stale and stale.get("valor") is not None:
+            return stale["valor"]
         return None
 
 
@@ -1976,7 +2011,7 @@ def lanzar_gemini_async(chat_id, datos=None, wb=None):
 
 # ================= RECOLECTAR Y ARMAR RESUMEN =================
 def recolectar_datos():
-    # Sin KDEN ni CLI en el pipeline de análisis (más rápido y limpio)
+    # Sin KDEN/CLI ni WindBorne en el promedio (WB trial off — solo /windborne)
     datos = {
         "kden": None,
         "nws_cli": None,
@@ -1986,9 +2021,10 @@ def recolectar_datos():
         "hrrr": get_hrrr(),
         "tomorrow_io": get_tomorrow_io(),
         "gfs": get_gfs(),
-        "windborne": get_windborne(),
+        "windborne": None,  # no llamar API muerta en cada /all
     }
     datos["traders"] = recolectar_fuentes_traders()
+    # Solo filtrar outlier si hay bastantes otros modelos
     _filtrar_7timer_outlier(datos)
     datos["kalshi_max_raw"] = None
     datos["kalshi_max"] = None
