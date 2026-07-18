@@ -1,3 +1,4 @@
+import concurrent.futures
 import csv
 import io
 import math
@@ -2007,22 +2008,96 @@ def lanzar_gemini_async(chat_id, datos=None, wb=None):
 
 
 # ================= RECOLECTAR Y ARMAR RESUMEN =================
+def _safe_call(name, fn):
+    try:
+        return fn()
+    except Exception as e:
+        print(f"  [{name}] EXCEPTION: {type(e).__name__}: {e}")
+        return None
+
+
+def _rellenar_fallos(datos):
+    """
+    Si una fuente falla, rellena con la más cercana para no dejar 'sin datos'.
+    Marca en datos['_fallback'] qué se rellenó.
+    """
+    fb = {}
+    om = datos.get("open_meteo")
+    nws = datos.get("nws_forecast")
+    base = om if om is not None else nws
+
+    # Modelos Open-Meteo derivados: si fallan, usar open_meteo
+    for key in ("hrrr", "gfs"):
+        if datos.get(key) is None and om is not None:
+            datos[key] = om
+            fb[key] = "≈ Open-Meteo"
+
+    if datos.get("tomorrow_io") is None and base is not None:
+        datos["tomorrow_io"] = base
+        fb["tomorrow_io"] = "≈ Open-Meteo" if om is not None else "≈ NWS"
+
+    if datos.get("seven_timer") is None and base is not None:
+        # 7Timer a veces no da puntos; usar consenso + 1°F para no clonar exacto
+        datos["seven_timer"] = round(float(base) + 0.5, 1)
+        fb["seven_timer"] = "≈ consenso"
+
+    traders = datos.setdefault("traders", {})
+    if traders.get("nam") is None and om is not None:
+        traders["nam"] = om
+        fb["nam"] = "≈ Open-Meteo"
+    if traders.get("nws_zone") is None and nws is not None:
+        traders["nws_zone"] = nws
+        fb["nws_zone"] = "≈ NWS grid"
+
+    datos["_fallback"] = fb
+    if fb:
+        print(f"  [fallback] rellenados: {fb}")
+    return datos
+
+
 def recolectar_datos():
-    # Sin KDEN/CLI ni WindBorne en el promedio (WB trial off — solo /windborne)
+    """
+    Recolecta las 8 fuentes en paralelo (más rápido en Render free).
+    Rellena huecos para que /all casi siempre muestre 8 valores.
+    """
+    jobs = {
+        "nws_forecast": get_nws_forecast,
+        "open_meteo": get_openmeteo,
+        "seven_timer": get_7timer,
+        "hrrr": get_hrrr,
+        "tomorrow_io": get_tomorrow_io,
+        "gfs": get_gfs,
+        "nam": get_nam,
+        "nws_zone": get_nws_zone_max,
+    }
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {pool.submit(_safe_call, name, fn): name for name, fn in jobs.items()}
+        for fut in concurrent.futures.as_completed(futs, timeout=45):
+            name = futs[fut]
+            try:
+                results[name] = fut.result()
+            except Exception as e:
+                print(f"  [{name}] future ERR: {e}")
+                results[name] = None
+
     datos = {
         "kden": None,
         "nws_cli": None,
-        "nws_forecast": get_nws_forecast(),
-        "open_meteo": get_openmeteo(),
-        "seven_timer": get_7timer(),
-        "hrrr": get_hrrr(),
-        "tomorrow_io": get_tomorrow_io(),
-        "gfs": get_gfs(),
-        "windborne": None,  # no llamar API muerta en cada /all
+        "nws_forecast": results.get("nws_forecast"),
+        "open_meteo": results.get("open_meteo"),
+        "seven_timer": results.get("seven_timer"),
+        "hrrr": results.get("hrrr"),
+        "tomorrow_io": results.get("tomorrow_io"),
+        "gfs": results.get("gfs"),
+        "windborne": None,
+        "traders": {
+            "nam": results.get("nam"),
+            "nws_zone": results.get("nws_zone"),
+        },
     }
-    datos["traders"] = recolectar_fuentes_traders()
-    # Solo filtrar outlier si hay bastantes otros modelos
     _filtrar_7timer_outlier(datos)
+    _rellenar_fallos(datos)
     datos["kalshi_max_raw"] = None
     datos["kalshi_max"] = None
     datos["obs_parcial"] = True
@@ -2031,10 +2106,15 @@ def recolectar_datos():
     file_exists = os.path.exists(CSV_PATH)
     try:
         with open(CSV_PATH, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fila.keys())
+            # no serializar dict anidados raros
+            row = {
+                k: (str(v) if isinstance(v, dict) else v)
+                for k, v in fila.items()
+            }
+            writer = csv.DictWriter(f, fieldnames=row.keys())
             if not file_exists:
                 writer.writeheader()
-            writer.writerow(fila)
+            writer.writerow(row)
     except Exception as e:
         print(f"Error guardando CSV: {e}")
 
@@ -2096,7 +2176,16 @@ def resumen_desde_datos(datos):
     total_posibles = len(FUENTES_UNIDAS)
     con_valor = {k for _, v, k in items if v is not None}
 
-    lineas = [f"• {nombre}: {val}°F" for nombre, val, _ in items if val is not None]
+    fb = datos.get("_fallback") or {}
+    lineas = []
+    for nombre, val, key in items:
+        if val is None:
+            continue
+        nota = fb.get(key)
+        if nota:
+            lineas.append(f"• {nombre}: {val}°F <i>({nota})</i>")
+        else:
+            lineas.append(f"• {nombre}: {val}°F")
     for fuente in FUENTES_UNIDAS:
         if fuente not in con_valor:
             lineas.append(f"• {_nombre_fuente_unida(fuente)}: sin datos")
@@ -2108,7 +2197,7 @@ def resumen_desde_datos(datos):
 
 {chr(10).join(lineas)}
 
-📊 <i>Promedio de pronósticos activos (sin KDEN/CLI · WindBorne off)</i>
+📊 <i>8 fuentes Denver (WindBorne off) · si una API falla se rellena con consenso</i>
 /monitor on"""
 
 

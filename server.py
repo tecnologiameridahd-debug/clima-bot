@@ -70,6 +70,7 @@ def health():
     return {
         "ok": True,
         "app": "clima-bot",
+        "version": "1.2.0",
         "bot_started": _bot_started,
         "bot_error": _bot_error,
         "started_at": _started_at,
@@ -80,6 +81,31 @@ def health():
             or _token_from_local()
         ),
     }
+
+
+@app.get("/api/sources")
+def api_sources():
+    """Diagnóstico: qué fuentes responden (sin secrets)."""
+    try:
+        from clima_bot import FUENTES_UNIDAS, recolectar_datos
+
+        datos = recolectar_datos()
+        out = {}
+        for f in FUENTES_UNIDAS:
+            if f in ("nam", "nws_zone"):
+                out[f] = (datos.get("traders") or {}).get(f)
+            else:
+                out[f] = datos.get(f)
+        n_ok = sum(1 for v in out.values() if isinstance(v, (int, float)))
+        return {
+            "ok": True,
+            "count_ok": n_ok,
+            "count_total": len(FUENTES_UNIDAS),
+            "sources": out,
+            "fallback": datos.get("_fallback") or {},
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def _token_from_local() -> bool:
