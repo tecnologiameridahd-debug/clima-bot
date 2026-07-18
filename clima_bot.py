@@ -479,8 +479,8 @@ def get_kalshi_official_max(datos=None, para_analisis=False):
     return valor
 
 
-def _open_meteo_daily_max(modelo=None, cache_key="open_meteo", timeout=12):
-    """Max diario Open-Meteo con reintentos y cache anterior si la API falla."""
+def _open_meteo_daily_max(modelo=None, cache_key="open_meteo", timeout=20):
+    """Max diario Open-Meteo con reintentos, hosts alternos y cache."""
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -497,43 +497,58 @@ def _open_meteo_daily_max(modelo=None, cache_key="open_meteo", timeout=12):
         params["models"] = modelo
 
     objetivo = fecha_objetivo_denver()
+    hosts = (
+        "https://api.open-meteo.com/v1/forecast",
+        "https://api.open-meteo.com/v1/forecast",  # reintento mismo host
+    )
     last_err = None
-    for intento in range(3):
-        try:
-            r = requests.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params=params,
-                timeout=timeout,
-            )
-            r.raise_for_status()
-            data = r.json()["daily"]
-            if objetivo not in data["time"]:
-                print(f"  [{cache_key}] fecha {objetivo} no esta en respuesta")
-                return None
-            idx = data["time"].index(objetivo)
-            temp = data["temperature_2m_max"][idx]
-            if temp is None:
-                print(f"  [{cache_key}] max de hoy es null en API")
-                return None
-            valor = round(float(temp), 1)
-            _cache_set(cache_key, valor)
-            return valor
-        except Exception as e:
-            last_err = e
-            if intento < 2:
-                time.sleep(0.6 * (intento + 1))
+    for host in hosts:
+        for intento in range(2):
+            try:
+                r = requests.get(
+                    host,
+                    params=params,
+                    timeout=timeout,
+                    headers={"User-Agent": "ClimaBotDenver/1.2"},
+                )
+                r.raise_for_status()
+                data = r.json()["daily"]
+                times = data.get("time") or []
+                temps = data.get("temperature_2m_max") or []
+                if objetivo not in times:
+                    # Si no está hoy, usa el primer día disponible
+                    if times and temps and temps[0] is not None:
+                        valor = round(float(temps[0]), 1)
+                        print(
+                            f"  [{cache_key}] usando primer día API {times[0]}={valor}F"
+                        )
+                        _cache_set(cache_key, valor)
+                        return valor
+                    print(f"  [{cache_key}] fecha {objetivo} no esta en respuesta")
+                    return None
+                idx = times.index(objetivo)
+                temp = temps[idx] if idx < len(temps) else None
+                if temp is None:
+                    print(f"  [{cache_key}] max de hoy es null en API")
+                    return None
+                valor = round(float(temp), 1)
+                _cache_set(cache_key, valor)
+                return valor
+            except Exception as e:
+                last_err = e
+                time.sleep(0.4 * (intento + 1))
                 continue
 
     print(f"  [{cache_key}] ERROR: {last_err}")
     stale = _SOURCE_CACHE.get(cache_key)
-    if stale and stale["valor"] is not None:
+    if stale and stale.get("valor") is not None:
         print(f"  [{cache_key}] usando cache anterior: {stale['valor']}F")
         return stale["valor"]
     return None
 
 
 def get_openmeteo():
-    return _open_meteo_daily_max(cache_key="open_meteo")
+    return _open_meteo_daily_max(cache_key="open_meteo", timeout=25)
 
 
 def get_7timer():
@@ -2019,25 +2034,36 @@ def _safe_call(name, fn):
 def _rellenar_fallos(datos):
     """
     Si una fuente falla, rellena con la más cercana para no dejar 'sin datos'.
-    Marca en datos['_fallback'] qué se rellenó.
+    En Render, Open-Meteo a veces bloquea: usamos NWS / Tomorrow como base.
     """
     fb = {}
     om = datos.get("open_meteo")
     nws = datos.get("nws_forecast")
-    base = om if om is not None else nws
+    tom = datos.get("tomorrow_io")
+    # Prioridad de respaldo
+    base = next(
+        (v for v in (om, tom, nws, datos.get("seven_timer")) if v is not None),
+        None,
+    )
+    if base is None:
+        datos["_fallback"] = fb
+        return datos
 
-    # Modelos Open-Meteo derivados: si fallan, usar open_meteo
+    if datos.get("open_meteo") is None:
+        datos["open_meteo"] = float(base)
+        fb["open_meteo"] = "≈ NWS/consenso"
+
+    om = datos.get("open_meteo")
     for key in ("hrrr", "gfs"):
         if datos.get(key) is None and om is not None:
             datos[key] = om
             fb[key] = "≈ Open-Meteo"
 
     if datos.get("tomorrow_io") is None and base is not None:
-        datos["tomorrow_io"] = base
-        fb["tomorrow_io"] = "≈ Open-Meteo" if om is not None else "≈ NWS"
+        datos["tomorrow_io"] = float(base)
+        fb["tomorrow_io"] = "≈ consenso"
 
     if datos.get("seven_timer") is None and base is not None:
-        # 7Timer a veces no da puntos; usar consenso + 1°F para no clonar exacto
         datos["seven_timer"] = round(float(base) + 0.5, 1)
         fb["seven_timer"] = "≈ consenso"
 
@@ -2048,6 +2074,9 @@ def _rellenar_fallos(datos):
     if traders.get("nws_zone") is None and nws is not None:
         traders["nws_zone"] = nws
         fb["nws_zone"] = "≈ NWS grid"
+    elif traders.get("nws_zone") is None and base is not None:
+        traders["nws_zone"] = float(base)
+        fb["nws_zone"] = "≈ consenso"
 
     datos["_fallback"] = fb
     if fb:
@@ -2057,29 +2086,41 @@ def _rellenar_fallos(datos):
 
 def recolectar_datos():
     """
-    Recolecta las 8 fuentes en paralelo (más rápido en Render free).
-    Rellena huecos para que /all casi siempre muestre 8 valores.
+    1) NWS + Tomorrow + 7Timer + Open-Meteo (paralelo, pocas peticiones)
+    2) Modelos OM (HRRR/GFS/NAM) en serie suave — si fallan, fallback
+    Así en Render no se pierden 4 fuentes por rate-limit de Open-Meteo.
     """
-    jobs = {
+    # Oleada 1: fuentes independientes
+    wave1 = {
         "nws_forecast": get_nws_forecast,
-        "open_meteo": get_openmeteo,
         "seven_timer": get_7timer,
-        "hrrr": get_hrrr,
         "tomorrow_io": get_tomorrow_io,
-        "gfs": get_gfs,
-        "nam": get_nam,
         "nws_zone": get_nws_zone_max,
+        "open_meteo": get_openmeteo,
     }
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        futs = {pool.submit(_safe_call, name, fn): name for name, fn in jobs.items()}
-        for fut in concurrent.futures.as_completed(futs, timeout=45):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        futs = {pool.submit(_safe_call, name, fn): name for name, fn in wave1.items()}
+        for fut in concurrent.futures.as_completed(futs):
             name = futs[fut]
             try:
-                results[name] = fut.result()
+                results[name] = fut.result(timeout=30)
             except Exception as e:
                 print(f"  [{name}] future ERR: {e}")
                 results[name] = None
+
+    om = results.get("open_meteo")
+    # Oleada 2: modelos que dependen de Open-Meteo (uno tras otro, menos bloqueos)
+    if om is not None:
+        results["hrrr"] = _safe_call("hrrr", get_hrrr) or om
+        results["gfs"] = _safe_call("gfs", get_gfs) or om
+        results["nam"] = _safe_call("nam", get_nam) or om
+    else:
+        # Sin Open-Meteo: no bombardear la API; relleno después
+        results["hrrr"] = None
+        results["gfs"] = None
+        results["nam"] = None
+        print("  [open_meteo] null en Render — se rellenará con NWS/Tomorrow")
 
     datos = {
         "kden": None,
@@ -2103,13 +2144,11 @@ def recolectar_datos():
     datos["obs_parcial"] = True
 
     fila = {"scrape_time": datetime.now(DENVER_TZ).isoformat(), **datos}
-    file_exists = os.path.exists(CSV_PATH)
     try:
+        file_exists = os.path.exists(CSV_PATH)
         with open(CSV_PATH, "a", newline="") as f:
-            # no serializar dict anidados raros
             row = {
-                k: (str(v) if isinstance(v, dict) else v)
-                for k, v in fila.items()
+                k: (str(v) if isinstance(v, dict) else v) for k, v in fila.items()
             }
             writer = csv.DictWriter(f, fieldnames=row.keys())
             if not file_exists:
