@@ -2377,11 +2377,12 @@ def generar_grafico_dashboard(datos, wb=None):
 
     ax2.axis("off")
     kalshi = datos.get("kalshi_max")
+    temps_modelo = [datos.get(f) for f in FUENTES_MODELO if datos.get(f) is not None]
     stats = [
         ("Oficial KDEN/CLI", f"{kalshi}°F" if kalshi else "N/D"),
         ("Promedio modelos", f"{promedio}°F"),
         ("Rango modelos", f"{min_mod}–{max_mod}°F" if min_mod is not None else "N/D"),
-        ("Modelos activos", f"{len(temps_modelo)}/6"),
+        ("Modelos activos", f"{len(temps_modelo)}/{len(FUENTES_MODELO)}"),
     ]
     ax2.set_title("Resumen numerico", fontsize=13, fontweight="bold", pad=12, color=CHART_TEXT)
     for i, (label, val) in enumerate(stats):
