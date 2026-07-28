@@ -11,9 +11,9 @@ import threading
 
 from flask import Flask, Response, jsonify, request
 
-from analysis import analizar
+from analysis import analizar, analizar_todas, edge_kalshi, log_peak
 from api import WindBorneError
-from charts import grafico_completo
+from charts import grafico_completo, grafico_historial
 from cities import KALSHI_CITIES, get_city, resolve_location
 from config import TELEGRAM_TOKEN
 from cyclones import BASINS, BASINS_USA, ciclones_activos
@@ -119,6 +119,7 @@ def api_resumen(city_id):
     if not a:
         return jsonify({"error": "Sin datos para hoy"}), 502
 
+    log_peak(a)
     metar = a.get("metar")
     return jsonify(
         {
@@ -158,6 +159,59 @@ def api_grafico(city_id):
     if not img:
         return jsonify({"error": "Sin datos para graficar"}), 502
     return Response(io.BytesIO(img).getvalue(), mimetype="image/png")
+
+
+@app.get("/api/edge/<city_id>")
+def api_edge(city_id):
+    try:
+        city = _resolver_ciudad(city_id)
+    except ValueError:
+        return jsonify({"error": f"Ciudad desconocida: {city_id}"}), 404
+    try:
+        a = analizar(city)
+    except WindBorneError as e:
+        return _error_json(e)
+    if not a:
+        return jsonify({"error": "Sin datos para hoy"}), 502
+
+    return jsonify(
+        {
+            "city": city["nombre"],
+            "pico_f": a["pico"]["temp_f"],
+            "pico_hora": a["pico"]["hora"],
+            "tips": edge_kalshi(a),
+        }
+    )
+
+
+@app.get("/api/kalshi")
+def api_kalshi():
+    resultados, errores = analizar_todas()
+    salida = []
+    for a in resultados:
+        c = a["city"]
+        m = a.get("metar")
+        salida.append(
+            {
+                "id": c["id"],
+                "nombre": c["nombre"],
+                "serie": c.get("serie"),
+                "pico_f": a["pico"]["temp_f"],
+                "pico_hora": a["pico"]["hora"],
+                "prob97": a["probs_pico"].get(97, 0),
+                "prob98": a["probs_pico"].get(98, 0),
+                "metar_f": m["temp_f"] if m and m.get("temp_f") is not None else None,
+            }
+        )
+    return jsonify({"ciudades": salida, "errores": errores})
+
+
+@app.get("/api/historial/<city_id>.png")
+def api_historial(city_id):
+    img = grafico_historial(city_id)
+    if not img:
+        return jsonify({"error": "Sin historial todavía (hace falta más de una consulta guardada)"}), 404
+    return Response(img, mimetype="image/png")
 
 
 @app.get("/api/huracanes")
@@ -243,6 +297,20 @@ DASHBOARD_HTML = """<!doctype html>
   .storm h4 { margin: 0 0 6px; }
   .hidden { display: none; }
   #tab-huracanes label { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 12px; }
+  .table-wrap { overflow-x: auto; }
+  table.kalshi { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.kalshi th {
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--ink-soft); padding: 8px 10px; border-bottom: 1px solid var(--line);
+  }
+  table.kalshi td { padding: 9px 10px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  table.kalshi tr:last-child td { border-bottom: none; }
+  table.kalshi tr:hover td { background: var(--accent-tint); cursor: pointer; }
+  ul.edge-tips { list-style: none; margin: 12px 0 0; padding: 0; }
+  ul.edge-tips li {
+    padding: 8px 12px; margin-bottom: 6px; border-radius: 6px; font-size: 13.5px;
+    background: var(--accent-tint);
+  }
 </style>
 </head>
 <body>
@@ -255,12 +323,16 @@ DASHBOARD_HTML = """<!doctype html>
     <select id="ciudad"></select>
     <button class="tab active" data-tab="resumen">Resumen</button>
     <button class="tab" data-tab="grafico">Gráfico</button>
+    <button class="tab" data-tab="kalshi">Kalshi (20)</button>
+    <button class="tab" data-tab="historial">Historial</button>
     <button class="tab" data-tab="huracanes">Huracanes</button>
     <button id="refrescar" style="margin-left:auto">Refrescar</button>
   </div>
 
   <div id="tab-resumen"></div>
   <div id="tab-grafico" class="hidden"></div>
+  <div id="tab-kalshi" class="hidden"></div>
+  <div id="tab-historial" class="hidden"></div>
   <div id="tab-huracanes" class="hidden">
     <label><input type="checkbox" id="hur-global" /> Ver las 8 cuencas globales (no solo USA)</label>
     <div id="hur-body"></div>
@@ -318,12 +390,74 @@ async function cargarResumen() {
         <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
       </div>
       ${pillsHtml ? `<p style="margin-top:16px">${pillsHtml}</p>` : ''}
+    </div>
+    <div class="card" id="edge-card">
+      <h3 style="margin:0 0 4px">Edge Kalshi</h3>
+      <p class="muted" style="margin:0">Cargando…</p>
     </div>`;
+
+  if (d.fuente === 'windborne') {
+    const re = await fetch(`/api/edge/${ciudadActual}`);
+    const de = await re.json();
+    const cardEdge = document.getElementById('edge-card');
+    if (de.error || !de.tips || de.tips.length === 0) {
+      cardEdge.innerHTML = `<h3 style="margin:0 0 4px">Edge Kalshi</h3><p class="muted" style="margin:0">Sin edge claro por ahora.</p>`;
+    } else {
+      cardEdge.innerHTML = `
+        <h3 style="margin:0 0 4px">Edge Kalshi</h3>
+        <p class="muted" style="margin:0">Pico WM-6: <b>${de.pico_f}°F</b> @ ${de.pico_hora}</p>
+        <ul class="edge-tips">${de.tips.map(t => `<li>${t}</li>`).join('')}</ul>
+        <p class="muted" style="margin:8px 0 0">No es consejo financiero. Cruza con METAR y la corrida del modelo.</p>`;
+    }
+  } else {
+    document.getElementById('edge-card').classList.add('hidden');
+  }
 }
 
 async function cargarGrafico() {
   const el = document.getElementById('tab-grafico');
   el.innerHTML = `<div class="card"><img class="grafico" src="/api/grafico/${ciudadActual}.png?t=${Date.now()}" alt="Gráfico WM-6" /></div>`;
+}
+
+async function cargarKalshi() {
+  const el = document.getElementById('tab-kalshi');
+  el.innerHTML = '<p class="muted">Consultando 20 ciudades (1 llamada API)…</p>';
+  const r = await fetch('/api/kalshi');
+  const d = await r.json();
+  const filas = (d.ciudades || []).map(c => `
+    <tr data-city="${c.id}">
+      <td><b>${c.nombre}</b></td>
+      <td>${c.pico_f}°F</td>
+      <td>${c.pico_hora}</td>
+      <td><span class="pill ${pillClass(c.prob97)}">${c.prob97}%</span></td>
+      <td>${c.metar_f != null ? c.metar_f + '°F' : '—'}</td>
+    </tr>`).join('');
+  const erroresHtml = d.errores && Object.keys(d.errores).length
+    ? `<p class="muted" style="margin-top:10px">Sin datos: ${Object.keys(d.errores).join(', ')}</p>`
+    : '';
+  el.innerHTML = `
+    <div class="card">
+      <div class="table-wrap">
+        <table class="kalshi">
+          <thead><tr><th>Ciudad</th><th>Pico</th><th>Hora</th><th>P≥97°F</th><th>METAR real</th></tr></thead>
+          <tbody>${filas}</tbody>
+        </table>
+      </div>
+      ${erroresHtml}
+    </div>`;
+  el.querySelectorAll('tr[data-city]').forEach(row => {
+    row.addEventListener('click', () => {
+      ciudadActual = row.dataset.city;
+      document.getElementById('ciudad').value = ciudadActual;
+      document.querySelector('button.tab[data-tab="resumen"]').click();
+    });
+  });
+}
+
+async function cargarHistorial() {
+  const el = document.getElementById('tab-historial');
+  el.innerHTML = `<div class="card"><img class="grafico" src="/api/historial/${ciudadActual}.png?t=${Date.now()}"
+    alt="Historial del pico" onerror="this.parentElement.innerHTML='<p class=muted>Todavía no hay suficiente historial guardado para ' + ciudadActual + '. Volvé a mirar más tarde (se guarda un punto cada vez que se consulta esta ciudad).</p>'" /></div>`;
 }
 
 async function cargarHuracanes() {
@@ -351,17 +485,19 @@ async function cargarHuracanes() {
 function cargarTab() {
   if (tabActual === 'resumen') cargarResumen();
   else if (tabActual === 'grafico') cargarGrafico();
+  else if (tabActual === 'kalshi') cargarKalshi();
+  else if (tabActual === 'historial') cargarHistorial();
   else if (tabActual === 'huracanes') cargarHuracanes();
 }
+
+const TABS = ['resumen', 'grafico', 'kalshi', 'historial', 'huracanes'];
 
 document.querySelectorAll('button.tab').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('button.tab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     tabActual = btn.dataset.tab;
-    document.getElementById('tab-resumen').classList.toggle('hidden', tabActual !== 'resumen');
-    document.getElementById('tab-grafico').classList.toggle('hidden', tabActual !== 'grafico');
-    document.getElementById('tab-huracanes').classList.toggle('hidden', tabActual !== 'huracanes');
+    TABS.forEach(t => document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tabActual));
     cargarTab();
   });
 });
