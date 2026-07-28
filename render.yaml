@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: windborne-monitor-dashboard
+    name: clima-bot
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
