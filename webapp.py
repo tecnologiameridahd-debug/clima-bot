@@ -55,9 +55,12 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
+BUILD_VERSION = "debug-lock-trace-1"
+
+
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "build": BUILD_VERSION})
 
 
 @app.get("/api/status")

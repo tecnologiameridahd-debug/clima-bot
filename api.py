@@ -169,7 +169,9 @@ def _wb_get(url, params, cache_key=None):
     headers = {"Authorization": f"Bearer {WIND_KEY}"}
     last_err = ""
 
+    print(f"  [wb_get] esperando _api_lock... url={url}", flush=True)
     with _api_lock:
+        print(f"  [wb_get] _api_lock adquirido", flush=True)
         # Doble-check tras adquirir lock
         if cache_key:
             fresh = _cache_get(cache_key, VAR_CACHE_TTL)
@@ -182,15 +184,19 @@ def _wb_get(url, params, cache_key=None):
             if delay:
                 _rate_limited_until = max(_rate_limited_until, time.time() + delay)
                 time.sleep(delay)
+            print(f"  [wb_get] attempt={attempt} throttle...", flush=True)
             _throttle()
+            print(f"  [wb_get] attempt={attempt} GET real a {url} params={params}", flush=True)
             try:
                 r = requests.get(url, headers=headers, params=params, timeout=60)
             except requests.RequestException as e:
                 last_err = str(e)
                 _api_stats["fail"] += 1
                 _api_stats["last_error"] = last_err
+                print(f"  [wb_get] attempt={attempt} EXCEPCION: {e}", flush=True)
                 continue
 
+            print(f"  [wb_get] attempt={attempt} status={r.status_code}", flush=True)
             if r.status_code == 200:
                 data = r.json()
                 if cache_key:
