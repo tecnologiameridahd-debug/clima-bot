@@ -1,10 +1,10 @@
 services:
   - type: web
     name: clima-bot
-    runtime: python
+    env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60
+    startCommand: python -m gunicorn webapp:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60
     healthCheckPath: /health
     envVars:
       - key: WINDBORNE_API_KEY
