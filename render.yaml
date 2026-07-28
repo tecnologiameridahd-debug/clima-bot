@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: windborne-monitor-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60
+    healthCheckPath: /health
+    envVars:
+      - key: WINDBORNE_API_KEY
+        sync: false
+      - key: WB_TELEGRAM_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RUN_TELEGRAM_BOT
+        value: "1"
