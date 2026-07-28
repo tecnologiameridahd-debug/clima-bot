@@ -60,6 +60,13 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.get("/api/status")
+def api_status_route():
+    from api import api_status
+
+    return jsonify(api_status())
+
+
 @app.get("/api/ciudades")
 def api_ciudades():
     return jsonify(
