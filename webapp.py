@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.2-max-modelo"
+BUILD_VERSION = "v4.3.3-max-modelo"
 
 
 @app.get("/health")
@@ -90,6 +90,54 @@ def _resolver_ciudad(city_id):
         raise
 
 
+def _nws_extremos(city):
+    """Max/min real NWS (rápido, no depende de WindBorne)."""
+    mm = mn = None
+    try:
+        from observations import metar_extremos_hoy
+
+        if city.get("station"):
+            ext = metar_extremos_hoy(city["station"], city["tz"])
+            if ext:
+                st = ext.get("station") or city["station"]
+                if ext.get("max"):
+                    mm = {**ext["max"], "station": st}
+                if ext.get("min"):
+                    mn = {**ext["min"], "station": st}
+    except Exception as e:
+        print(f"[webapp] nws: {e}")
+    return mm, mn
+
+
+def _hw_modelo(city, pico_actual=None, hora_actual=None):
+    try:
+        from analysis import pico_wm6_max_hoy
+        from datetime import datetime as _dt
+
+        fecha = _dt.now(city["tz"]).strftime("%Y-%m-%d")
+        return pico_wm6_max_hoy(
+            city["id"], fecha, pico_actual=pico_actual, hora_actual=hora_actual
+        )
+    except Exception as e:
+        print(f"[webapp] hw: {e}")
+        return None
+
+
+def _pack_extremos(mm, mn):
+    return {
+        "metar_max_hoy": (
+            {"temp_f": mm["temp_f"], "hora": mm.get("hora"), "station": mm.get("station")}
+            if mm and mm.get("temp_f") is not None
+            else None
+        ),
+        "metar_min_hoy": (
+            {"temp_f": mn["temp_f"], "hora": mn.get("hora"), "station": mn.get("station")}
+            if mn and mn.get("temp_f") is not None
+            else None
+        ),
+    }
+
+
 @app.get("/api/resumen/<city_id>")
 def api_resumen(city_id):
     try:
@@ -97,121 +145,129 @@ def api_resumen(city_id):
     except ValueError:
         return jsonify({"error": f"Ciudad desconocida: {city_id}"}), 404
 
+    # Siempre cargar max/min real + techo modelo (no se cuelga en WindBorne)
+    mm, mn = _nws_extremos(city)
+    hw = _hw_modelo(city)
+
     try:
-        try:
-            a = analizar(city)
-        except WindBorneError as e:
-            # Fallback Open-Meteo si WindBorne no responde.
+        # Tope duro: si WB se cuelga, devolver NWS+modelo en <40s
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(analizar, city)
             try:
-                om = resumen_om(city=city)
-                # Aun con fallback: max/min real NWS + techo WM-6 registrado
-                mm = mn = None
-                try:
-                    from observations import metar_extremos_hoy
+                a = fut.result(timeout=35)
+            except FuturesTimeout:
+                a = None
+                wb_err = "WindBorne timeout (35s)"
+            except WindBorneError as e:
+                a = None
+                wb_err = str(e)
+            except Exception as e:
+                a = None
+                wb_err = f"{type(e).__name__}: {e}"
+            else:
+                wb_err = None
 
-                    if city.get("station"):
-                        ext = metar_extremos_hoy(city["station"], city["tz"])
-                        if ext:
-                            mm = ext.get("max")
-                            mn = ext.get("min")
-                            if mm:
-                                mm = {
-                                    **mm,
-                                    "station": ext.get("station") or city["station"],
-                                }
-                            if mn:
-                                mn = {
-                                    **mn,
-                                    "station": ext.get("station") or city["station"],
-                                }
-                except Exception:
-                    pass
-                fecha = __import__("datetime").datetime.now(city["tz"]).strftime("%Y-%m-%d")
-                hw = None
-                try:
-                    from analysis import pico_wm6_max_hoy
+        if a:
+            try:
+                log_peak(a)
+            except Exception as e:
+                print(f"[webapp] log_peak: {e}")
+            # refrescar extremos del análisis (incluye NWS si se pudieron leer)
+            mm = a.get("metar_max_hoy") or mm
+            mn = a.get("metar_min_hoy") or mn
+            hw = a.get("pico_wm6_max_hoy") or hw
+            metar = a.get("metar")
+            pk = a.get("pico_kalshi")
+            return jsonify(
+                {
+                    "city": city["nombre"],
+                    "fuente": "windborne",
+                    "fecha": a["fecha"],
+                    "init_txt": a["init_txt"],
+                    "ahora_f": a["ahora"]["temp_f"],
+                    "ahora_hora": a["ahora"]["hora"],
+                    "pico_f": a["pico"]["temp_f"],
+                    "pico_hora": a["pico"]["hora"],
+                    "pico_wm6_max_hoy": (
+                        {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
+                        if hw and hw.get("temp_f") is not None
+                        else None
+                    ),
+                    "pico_kalshi": (
+                        {
+                            "temp_f": pk["temp_f"],
+                            "hora": pk.get("hora"),
+                            "fuente": pk.get("fuente"),
+                        }
+                        if pk and pk.get("temp_f") is not None
+                        else None
+                    ),
+                    "min_f": a["min_dia"],
+                    "min_hora": (a.get("minimo") or {}).get("hora"),
+                    "promedio": a["promedio"],
+                    "probs_pico": {
+                        str(k): v for k, v in (a.get("probs_pico") or {}).items()
+                    },
+                    "metar": (
+                        {
+                            "temp_f": metar["temp_f"],
+                            "age_min": metar["age_min"],
+                            "station": metar["station"],
+                        }
+                        if metar and metar.get("temp_f") is not None
+                        else None
+                    ),
+                    **_pack_extremos(mm, mn),
+                }
+            )
 
-                    hw = pico_wm6_max_hoy(
-                        city["id"],
-                        fecha,
-                        pico_actual=om.get("pico_hoy"),
-                        hora_actual=None,
-                    )
-                except Exception:
-                    pass
-                pico_kalshi = None
-                if mm and mm.get("temp_f") is not None:
-                    pico_kalshi = {
-                        "temp_f": mm["temp_f"],
-                        "hora": mm.get("hora"),
-                        "fuente": f"NWS {mm.get('station') or ''}".strip(),
-                    }
-                elif om.get("pico_hoy") is not None:
-                    pico_kalshi = {
-                        "temp_f": om.get("pico_hoy"),
-                        "hora": None,
-                        "fuente": "Open-Meteo",
-                    }
-                return jsonify(
-                    {
-                        "city": city["nombre"],
-                        "fuente": "open-meteo",
-                        "wb_error": str(e),
-                        "ahora_f": om.get("ahora_f"),
-                        "pico_f": om.get("pico_hoy"),
-                        "min_f": om.get("min_hoy"),
-                        "pico_wm6_max_hoy": (
-                            {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
-                            if hw and hw.get("temp_f") is not None
-                            else None
-                        ),
-                        "pico_kalshi": pico_kalshi,
-                        "metar_max_hoy": (
-                            {
-                                "temp_f": mm["temp_f"],
-                                "hora": mm.get("hora"),
-                                "station": mm.get("station"),
-                            }
-                            if mm and mm.get("temp_f") is not None
-                            else None
-                        ),
-                        "metar_min_hoy": (
-                            {
-                                "temp_f": mn["temp_f"],
-                                "hora": mn.get("hora"),
-                                "station": mn.get("station"),
-                            }
-                            if mn and mn.get("temp_f") is not None
-                            else None
-                        ),
-                    }
-                )
-            except Exception as e2:
-                return _error_json(f"WindBorne: {e} · Open-Meteo: {e2}")
-
-        if not a:
-            return jsonify({"error": "Sin datos para hoy"}), 502
-
+        # Fallback: Open-Meteo + NWS + techo modelo registrado
+        om = {}
         try:
-            log_peak(a)
-        except Exception as e:
-            print(f"[webapp] log_peak: {e}")
-
-        metar = a.get("metar")
-        metar_max = a.get("metar_max_hoy")
-        metar_min = a.get("metar_min_hoy")
-        hw = a.get("pico_wm6_max_hoy")
-        pk = a.get("pico_kalshi")
+            om = resumen_om(city=city) or {}
+        except Exception as e2:
+            print(f"[webapp] om fallback: {e2}")
+        hw = _hw_modelo(city, pico_actual=om.get("pico_hoy")) or hw
+        pico_kalshi = None
+        if mm and mm.get("temp_f") is not None:
+            pico_kalshi = {
+                "temp_f": mm["temp_f"],
+                "hora": mm.get("hora"),
+                "fuente": f"NWS {mm.get('station') or ''}".strip(),
+            }
+        elif om.get("pico_hoy") is not None:
+            pico_kalshi = {
+                "temp_f": om.get("pico_hoy"),
+                "hora": None,
+                "fuente": "Open-Meteo",
+            }
         return jsonify(
             {
                 "city": city["nombre"],
-                "fuente": "windborne",
-                "fecha": a["fecha"],
-                "init_txt": a["init_txt"],
-                "ahora_f": a["ahora"]["temp_f"],
-                "ahora_hora": a["ahora"]["hora"],
-                "pico_f": a["pico"]["temp_f"],
-                "pico_hora": a["pico"]["hora"],
+                "fuente": "open-meteo" if om else "nws-only",
+                "wb_error": wb_err or "sin datos WindBorne",
+                "ahora_f": om.get("ahora_f"),
+                "pico_f": om.get("pico_hoy"),
+                "min_f": om.get("min_hoy"),
+                "pico_wm6_max_hoy": (
+                    {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
+                    if hw and hw.get("temp_f") is not None
+                    else None
+                ),
+                "pico_kalshi": pico_kalshi,
+                **_pack_extremos(mm, mn),
+            }
+        )
+    except Exception as e:
+        print(f"[webapp] api_resumen error: {type(e).__name__}: {e}")
+        # Último recurso: solo NWS + highwater
+        return jsonify(
+            {
+                "city": city["nombre"],
+                "fuente": "nws-only",
+                "wb_error": str(e),
                 "pico_wm6_max_hoy": (
                     {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
                     if hw and hw.get("temp_f") is not None
@@ -219,49 +275,16 @@ def api_resumen(city_id):
                 ),
                 "pico_kalshi": (
                     {
-                        "temp_f": pk["temp_f"],
-                        "hora": pk.get("hora"),
-                        "fuente": pk.get("fuente"),
+                        "temp_f": mm["temp_f"],
+                        "hora": mm.get("hora"),
+                        "fuente": f"NWS {mm.get('station') or ''}".strip(),
                     }
-                    if pk and pk.get("temp_f") is not None
+                    if mm and mm.get("temp_f") is not None
                     else None
                 ),
-                "min_f": a["min_dia"],
-                "min_hora": (a.get("minimo") or {}).get("hora"),
-                "promedio": a["promedio"],
-                "probs_pico": {str(k): v for k, v in (a.get("probs_pico") or {}).items()},
-                "metar": (
-                    {
-                        "temp_f": metar["temp_f"],
-                        "age_min": metar["age_min"],
-                        "station": metar["station"],
-                    }
-                    if metar and metar.get("temp_f") is not None
-                    else None
-                ),
-                "metar_max_hoy": (
-                    {
-                        "temp_f": metar_max["temp_f"],
-                        "hora": metar_max["hora"],
-                        "station": metar_max["station"],
-                    }
-                    if metar_max and metar_max.get("temp_f") is not None
-                    else None
-                ),
-                "metar_min_hoy": (
-                    {
-                        "temp_f": metar_min["temp_f"],
-                        "hora": metar_min["hora"],
-                        "station": metar_min["station"],
-                    }
-                    if metar_min and metar_min.get("temp_f") is not None
-                    else None
-                ),
+                **_pack_extremos(mm, mn),
             }
         )
-    except Exception as e:
-        print(f"[webapp] api_resumen error: {type(e).__name__}: {e}")
-        return _error_json(f"{type(e).__name__}: {e}", status=500)
 
 
 @app.get("/api/grafico/<city_id>.png")
@@ -461,7 +484,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.2</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.3</p>
 </header>
 <main>
   <div class="controls">

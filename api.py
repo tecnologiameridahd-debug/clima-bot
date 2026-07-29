@@ -184,7 +184,7 @@ def _wb_get(url, params, cache_key=None):
                 time.sleep(delay)
             _throttle()
             try:
-                r = requests.get(url, headers=headers, params=params, timeout=25)
+                r = requests.get(url, headers=headers, params=params, timeout=18)
             except requests.RequestException as e:
                 last_err = str(e)
                 _api_stats["fail"] += 1
