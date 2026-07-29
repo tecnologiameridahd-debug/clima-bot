@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.5-fast"
+BUILD_VERSION = "v4.3.6-fast"
 
 
 @app.get("/health")
@@ -227,14 +227,15 @@ def api_resumen(city_id):
             }
         )
 
-    # Rápido: Open-Meteo + NWS + techo modelo
+    # Open-Meteo solo si faltan extremos (evita colgar cuando NWS ya basta)
     om = {}
-    try:
-        om = resumen_om(city=city) or {}
-    except Exception as e2:
-        print(f"[webapp] om: {e2}")
-        if not wb_err:
-            wb_err = str(e2)
+    if not (mm and mm.get("temp_f") is not None):
+        try:
+            om = resumen_om(city=city) or {}
+        except Exception as e2:
+            print(f"[webapp] om: {e2}")
+            if not wb_err:
+                wb_err = str(e2)
     hw = _hw_modelo(city, pico_actual=om.get("pico_hoy")) or hw
     pico_kalshi = None
     if mm and mm.get("temp_f") is not None:
@@ -249,14 +250,18 @@ def api_resumen(city_id):
             "hora": None,
             "fuente": "Open-Meteo",
         }
+    fuente = "nws+modelo"
+    if om:
+        fuente = "open-meteo"
     return jsonify(
         {
             "city": city["nombre"],
-            "fuente": "open-meteo" if om else "nws-only",
+            "fuente": fuente,
             "wb_error": wb_err,
             "ahora_f": om.get("ahora_f"),
             "pico_f": om.get("pico_hoy"),
-            "min_f": om.get("min_hoy"),
+            "min_f": om.get("min_hoy") if om else (mn.get("temp_f") if mn else None),
+            "min_hora": mn.get("hora") if mn else None,
             "pico_wm6_max_hoy": (
                 {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
                 if hw and hw.get("temp_f") is not None
@@ -465,7 +470,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.5</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.6</p>
 </header>
 <main>
   <div class="controls">

@@ -32,7 +32,7 @@ def fetch_open_meteo_day(city=None, force=False):
             "timezone": str(city["tz"]),
             "forecast_days": 2,
         },
-        timeout=30,
+        timeout=8,
     )
     r.raise_for_status()
     data = r.json()

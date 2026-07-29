@@ -105,7 +105,7 @@ def metar_extremos_hoy(station_id, tz, force=False):
             f"https://api.weather.gov/stations/{station_id}/observations",
             params={"start": start, "limit": 500},
             headers=NWS_HEADERS,
-            timeout=20,
+            timeout=8,
         )
         r.raise_for_status()
         feats = r.json().get("features", [])
