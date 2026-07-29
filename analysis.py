@@ -13,12 +13,14 @@ from api import (
     get_points_hoy,
 )
 from cities import DEFAULT_CITY_ID, KALSHI_CITIES, get_city
-from config import CACHE_DIR, UMBRALES_F, UMBRAL_ALERTA_CAMBIO, log_csv_path
+from config import BASE_DIR, CACHE_DIR, UMBRALES_F, UMBRAL_ALERTA_CAMBIO, log_csv_path
 from observations import get_metar_obs, metar_extremos_hoy, metar_linea, metar_max_hoy
 from utils import c_to_f
 from wb_interp import enriquecer_min, enriquecer_pico, futuros_sin_repetir, texto_hora
 
-_HW_JSON = Path(CACHE_DIR) / "pico_highwater.json"
+# Fuera de cache/ (gitignored) para poder seedear el techo del modelo en deploy
+_HW_JSON = Path(BASE_DIR) / "pico_highwater.json"
+_HW_JSON_CACHE = Path(CACHE_DIR) / "pico_highwater.json"
 
 
 def dist_f(dist):
@@ -110,19 +112,32 @@ def _leer_filas_log(city_id):
 
 
 def _load_hw_disk():
-    try:
-        if _HW_JSON.exists():
-            return json.loads(_HW_JSON.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
+    """Carga techos WM-6; fusiona seed del repo + runtime en cache/."""
+    store = {}
+    for path in (_HW_JSON, _HW_JSON_CACHE):
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if not isinstance(v, dict) or v.get("temp_f") is None:
+                            continue
+                        prev = store.get(k)
+                        if prev is None or float(v["temp_f"]) > float(prev.get("temp_f") or -999):
+                            store[k] = v
+        except Exception:
+            pass
+    return store
 
 
 def _save_hw_disk(store):
-    try:
-        _HW_JSON.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
-    except Exception as e:
-        print(f"  [hw] save fail: {e}")
+    # Runtime: cache/ (escribible en Render). Seed: root (versionable).
+    for path in (_HW_JSON_CACHE, _HW_JSON):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            print(f"  [hw] save fail {path.name}: {e}")
 
 
 def _actualizar_highwater(city_id, fecha, temp_f, hora=None):
