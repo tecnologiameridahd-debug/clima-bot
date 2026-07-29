@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.8-discrepancia"
+BUILD_VERSION = "v4.3.9-completo"
 
 
 @app.get("/health")
@@ -138,64 +138,155 @@ def _pack_extremos(mm, mn):
     }
 
 
+def _om_rapido(city):
+    """Open-Meteo: ahora + max/min modelo del día (fallback si no hay WM-6)."""
+    try:
+        return resumen_om(city=city) or {}
+    except Exception as e:
+        print(f"[webapp] om: {e}")
+        return {}
+
+
+def _delta_txt(d, etiqueta="Modelo"):
+    if d is None:
+        return None
+    if d > 0.3:
+        return f"{etiqueta} {d:+.1f}°F más alto que el real"
+    if d < -0.3:
+        return f"{etiqueta} {d:+.1f}°F más bajo que el real"
+    return f"{etiqueta} y real casi iguales ({d:+.1f}°F)"
+
+
 @app.get("/api/resumen/<city_id>")
 def api_resumen(city_id):
-    """Resumen rápido: max/min REAL (NWS) + max MODELO registrado. Sin bloquear en WB."""
+    """Siempre rellena: max/min REAL, max/min MODELO, ahora, discrepancia.
+
+    REAL = NWS. MODELO = techo WM-6 registrado si hay; si no Open-Meteo.
+    Denver seed de highwater no se toca (solo se lee).
+    """
     try:
         city = _resolver_ciudad(city_id)
     except ValueError:
         return jsonify({"error": f"Ciudad desconocida: {city_id}"}), 404
 
-    # 1) Techo modelo (archivo local, instantáneo)
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
+
+    # Paralelo: NWS (real) + Open-Meteo (modelo/ahora) + highwater local
     hw = _hw_modelo(city)
-
-    # 2) Max/min real NWS con tope de hilo (si weather.gov cuelga, no tumba la página)
     mm = mn = None
+    om = {}
+    pool = ThreadPoolExecutor(max_workers=2)
     try:
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
-
-        pool = ThreadPoolExecutor(max_workers=1)
+        f_nws = pool.submit(_nws_extremos, city)
+        f_om = pool.submit(_om_rapido, city)
         try:
-            fut = pool.submit(_nws_extremos, city)
-            mm, mn = fut.result(timeout=10)
+            mm, mn = f_nws.result(timeout=10)
         except FutTimeout:
-            print("[webapp] NWS timeout 10s")
+            print("[webapp] NWS timeout")
         except Exception as e:
             print(f"[webapp] NWS: {e}")
-        finally:
-            pool.shutdown(wait=False)
-    except Exception as e:
-        print(f"[webapp] NWS pool: {e}")
         try:
-            mm, mn = _nws_extremos(city)
-        except Exception:
-            pass
+            om = f_om.result(timeout=10) or {}
+        except FutTimeout:
+            print("[webapp] OM timeout")
+        except Exception as e:
+            print(f"[webapp] OM: {e}")
+    finally:
+        pool.shutdown(wait=False)
+
+    # --- REAL (NWS) ---
+    max_real = mm["temp_f"] if mm and mm.get("temp_f") is not None else None
+    min_real = mn["temp_f"] if mn and mn.get("temp_f") is not None else None
+
+    # --- MODELO: techo WM-6 si existe; si no (o es menor), rellenar con Open-Meteo ---
+    om_max = om.get("pico_hoy")
+    om_min = om.get("min_hoy")
+    if om_max is not None:
+        try:
+            om_max = round(float(om_max), 1)
+        except (TypeError, ValueError):
+            om_max = None
+    if om_min is not None:
+        try:
+            om_min = round(float(om_min), 1)
+        except (TypeError, ValueError):
+            om_min = None
+
+    # Highwater WM-6 no baja con OM. OM solo rellena si no hay techo, o si es mayor.
+    max_modelo = None
+    max_modelo_fuente = None
+    max_modelo_hora = None
+    if hw and hw.get("temp_f") is not None:
+        max_modelo = float(hw["temp_f"])
+        max_modelo_fuente = "WM-6 techo registrado"
+        max_modelo_hora = hw.get("hora")
+    if om_max is not None:
+        if max_modelo is None:
+            max_modelo = om_max
+            max_modelo_fuente = "Open-Meteo"
+            max_modelo_hora = None
+        elif om_max > max_modelo:
+            max_modelo = om_max
+            max_modelo_fuente = "Open-Meteo (mayor que techo WM-6)"
+            max_modelo_hora = None
+            try:
+                from analysis import pico_wm6_max_hoy
+                from datetime import datetime as _dt
+
+                pico_wm6_max_hoy(
+                    city["id"],
+                    _dt.now(city["tz"]).strftime("%Y-%m-%d"),
+                    pico_actual=om_max,
+                    hora_actual="OM",
+                )
+            except Exception:
+                pass
+    if max_modelo is not None:
+        max_modelo = round(float(max_modelo), 1)
+
+    min_modelo = om_min
+    min_modelo_fuente = "Open-Meteo" if om_min is not None else None
+
+    ahora_f = om.get("ahora_f")
+    ahora_hora = om.get("hora_ahora")
 
     pico_kalshi = None
-    if mm and mm.get("temp_f") is not None:
+    if max_real is not None:
         pico_kalshi = {
-            "temp_f": mm["temp_f"],
-            "hora": mm.get("hora"),
-            "fuente": f"NWS {mm.get('station') or ''}".strip(),
+            "temp_f": max_real,
+            "hora": (mm or {}).get("hora"),
+            "fuente": f"NWS {(mm or {}).get('station') or city.get('station') or ''}".strip(),
         }
 
-    # Discrepancia entre fuentes (no altera los valores; solo compara)
-    max_real = mm["temp_f"] if mm and mm.get("temp_f") is not None else None
-    max_modelo = hw["temp_f"] if hw and hw.get("temp_f") is not None else None
-    min_real = mn["temp_f"] if mn and mn.get("temp_f") is not None else None
-    disc = {}
+    # Discrepancias
+    disc = {"filas": []}
     if max_real is not None and max_modelo is not None:
         dmax = round(float(max_modelo) - float(max_real), 1)
         disc["max_modelo_menos_real"] = dmax
-        if dmax > 0.3:
-            disc["max_lectura"] = f"Modelo {dmax:+.1f}°F más alto que el real (modelo caliente)"
-        elif dmax < -0.3:
-            disc["max_lectura"] = f"Modelo {dmax:+.1f}°F más bajo que el real (modelo frío)"
-        else:
-            disc["max_lectura"] = f"Modelo y real casi iguales ({dmax:+.1f}°F)"
+        disc["max_lectura"] = _delta_txt(dmax, "Máx modelo")
+        disc["filas"].append(
+            {
+                "label": "Máx MODELO − Máx REAL",
+                "delta": dmax,
+                "a": max_modelo,
+                "b": max_real,
+            }
+        )
+    if min_real is not None and min_modelo is not None:
+        dmin = round(float(min_modelo) - float(min_real), 1)
+        disc["min_modelo_menos_real"] = dmin
+        disc["min_lectura"] = _delta_txt(dmin, "Mín modelo")
+        disc["filas"].append(
+            {
+                "label": "Mín MODELO − Mín REAL",
+                "delta": dmin,
+                "a": min_modelo,
+                "b": min_real,
+            }
+        )
     disc["nota"] = (
-        "REAL = estación NWS (Kalshi). MODELO = techo WM-6 registrado del día. "
-        "No se reescriben: solo se muestra la diferencia."
+        "REAL = NWS (Kalshi). MODELO = techo WM-6 si hay, si no Open-Meteo. "
+        "Los valores no se reescriben entre sí; solo se comparan."
     )
 
     return jsonify(
@@ -203,14 +294,33 @@ def api_resumen(city_id):
             "city": city["nombre"],
             "city_id": city.get("id"),
             "fuente": "nws+modelo",
-            "ahora_f": None,
+            "ahora_f": ahora_f,
+            "ahora_hora": ahora_hora,
             "pico_f": max_modelo,
-            "pico_hora": hw.get("hora") if hw else None,
-            "min_f": min_real,
-            "min_hora": mn.get("hora") if mn else None,
+            "pico_hora": max_modelo_hora,
+            "min_f": min_modelo,
+            "min_hora": None,
+            "min_modelo": (
+                {"temp_f": min_modelo, "fuente": min_modelo_fuente}
+                if min_modelo is not None
+                else None
+            ),
+            "max_modelo": (
+                {
+                    "temp_f": max_modelo,
+                    "hora": max_modelo_hora,
+                    "fuente": max_modelo_fuente,
+                }
+                if max_modelo is not None
+                else None
+            ),
             "pico_wm6_max_hoy": (
-                {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
-                if hw and hw.get("temp_f") is not None
+                {
+                    "temp_f": max_modelo,
+                    "hora": max_modelo_hora,
+                    "fuente": max_modelo_fuente,
+                }
+                if max_modelo is not None
                 else None
             ),
             "pico_kalshi": pico_kalshi,
@@ -428,7 +538,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.8</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.9</p>
 </header>
 <main>
   <div class="controls">
@@ -492,82 +602,93 @@ async function cargarResumen() {
     : '';
   const mm = d.metar_max_hoy;
   const mn = d.metar_min_hoy;
-  const hw = d.pico_wm6_max_hoy;
-  // Máx real NWS (Kalshi) y máx modelo REGISTRADO (techo WM-6 del día, no baja)
+  const mx = d.max_modelo || d.pico_wm6_max_hoy;
+  const mnMod = d.min_modelo;
   const maxReal = (mm && mm.temp_f != null)
     ? { temp_f: mm.temp_f, hora: mm.hora, fuente: 'REAL NWS ' + (mm.station || '') }
     : null;
-  const maxModelo = (hw && hw.temp_f != null)
-    ? { temp_f: hw.temp_f, hora: hw.hora, fuente: 'Techo WM-6 del día (registrado)' }
-    : (d.pico_f != null
-        ? { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'WM-6 corrida actual' }
-        : null);
+  const maxModelo = (mx && mx.temp_f != null)
+    ? { temp_f: mx.temp_f, hora: mx.hora, fuente: mx.fuente || 'Modelo' }
+    : (d.pico_f != null ? { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'Modelo' } : null);
   const minReal = (mn && mn.temp_f != null)
     ? { temp_f: mn.temp_f, hora: mn.hora, fuente: 'REAL NWS ' + (mn.station || '') }
     : null;
-  const minModelo = (d.min_f != null)
-    ? { temp_f: d.min_f, hora: d.min_hora, fuente: 'WM-6 del día' }
-    : null;
+  const minModelo = (mnMod && mnMod.temp_f != null)
+    ? { temp_f: mnMod.temp_f, fuente: mnMod.fuente || 'Modelo' }
+    : (d.min_f != null ? { temp_f: d.min_f, fuente: 'Modelo' } : null);
   const heroHtml = `
     <div class="hero-row">
       <div class="hero-pico">
         <p class="label">Máximo REAL del día</p>
         <p class="value">${maxReal ? maxReal.temp_f + '°F' : '—'}</p>
-        <p class="sub">${maxReal ? ((maxReal.fuente || '') + (maxReal.hora ? ' · @ ' + maxReal.hora : '')) : 'sin obs NWS aún'}</p>
+        <p class="sub">${maxReal ? ((maxReal.fuente || '') + (maxReal.hora ? ' · @ ' + maxReal.hora : '')) : 'NWS sin datos'}</p>
       </div>
       <div class="hero-pico model">
-        <p class="label">Máximo MODELO registrado</p>
+        <p class="label">Máximo MODELO</p>
         <p class="value">${maxModelo ? maxModelo.temp_f + '°F' : '—'}</p>
-        <p class="sub">${maxModelo ? ((maxModelo.fuente || '') + (maxModelo.hora ? ' · @ ' + maxModelo.hora : '')) : '—'}</p>
+        <p class="sub">${maxModelo ? ((maxModelo.fuente || '') + (maxModelo.hora ? ' · @ ' + maxModelo.hora : '')) : 'sin modelo'}</p>
       </div>
       <div class="hero-pico min">
         <p class="label">Mínimo REAL del día</p>
         <p class="value">${minReal ? minReal.temp_f + '°F' : '—'}</p>
-        <p class="sub">${minReal ? ((minReal.fuente || '') + (minReal.hora ? ' · @ ' + minReal.hora : '')) : 'sin obs NWS aún'}</p>
+        <p class="sub">${minReal ? ((minReal.fuente || '') + (minReal.hora ? ' · @ ' + minReal.hora : '')) : 'NWS sin datos'}</p>
       </div>
       <div class="hero-pico model">
         <p class="label">Mínimo MODELO</p>
         <p class="value">${minModelo ? minModelo.temp_f + '°F' : '—'}</p>
-        <p class="sub">${minModelo ? ((minModelo.fuente || '') + (minModelo.hora ? ' · @ ' + minModelo.hora : '')) : '—'}</p>
+        <p class="sub">${minModelo ? (minModelo.fuente || 'Modelo') : 'sin modelo'}</p>
       </div>
     </div>`;
-  // Discrepancia entre fuentes (modelo − real). No cambia los valores.
+  // Discrepancia
   const disc = d.discrepancia || {};
   let discRows = '';
-  if (maxReal && maxModelo && maxReal.temp_f != null && maxModelo.temp_f != null) {
-    const dmax = Math.round((Number(maxModelo.temp_f) - Number(maxReal.temp_f)) * 10) / 10;
-    const cls = dmax > 0.3 ? 'pos' : (dmax < -0.3 ? 'neg' : 'neu');
-    const signo = dmax > 0 ? '+' : '';
-    discRows += `<div class="row">Máx <b>MODELO</b> − Máx <b>REAL</b>: <span class="tag ${cls}">${signo}${dmax}°F</span>
-      <span class="muted">(${maxModelo.temp_f} − ${maxReal.temp_f})</span></div>`;
+  const filas = disc.filas || [];
+  if (filas.length) {
+    filas.forEach(f => {
+      const cls = f.delta > 0.3 ? 'pos' : (f.delta < -0.3 ? 'neg' : 'neu');
+      const signo = f.delta > 0 ? '+' : '';
+      discRows += `<div class="row">${f.label}: <span class="tag ${cls}">${signo}${f.delta}°F</span>
+        <span class="muted">(${f.a} − ${f.b})</span></div>`;
+    });
+  } else {
+    if (maxReal && maxModelo) {
+      const dmax = Math.round((Number(maxModelo.temp_f) - Number(maxReal.temp_f)) * 10) / 10;
+      const cls = dmax > 0.3 ? 'pos' : (dmax < -0.3 ? 'neg' : 'neu');
+      const signo = dmax > 0 ? '+' : '';
+      discRows += `<div class="row">Máx MODELO − Máx REAL: <span class="tag ${cls}">${signo}${dmax}°F</span></div>`;
+    }
+    if (minReal && minModelo) {
+      const dmin = Math.round((Number(minModelo.temp_f) - Number(minReal.temp_f)) * 10) / 10;
+      const cls = dmin > 0.3 ? 'pos' : (dmin < -0.3 ? 'neg' : 'neu');
+      const signo = dmin > 0 ? '+' : '';
+      discRows += `<div class="row">Mín MODELO − Mín REAL: <span class="tag ${cls}">${signo}${dmin}°F</span></div>`;
+    }
   }
-  if (minReal && minModelo && minReal.temp_f != null && minModelo.temp_f != null
-      && Number(minReal.temp_f) !== Number(minModelo.temp_f)) {
-    const dmin = Math.round((Number(minModelo.temp_f) - Number(minReal.temp_f)) * 10) / 10;
-    const cls = dmin > 0.3 ? 'pos' : (dmin < -0.3 ? 'neg' : 'neu');
-    const signo = dmin > 0 ? '+' : '';
-    discRows += `<div class="row">Mín <b>MODELO</b> − Mín <b>REAL</b>: <span class="tag ${cls}">${signo}${dmin}°F</span>
-      <span class="muted">(${minModelo.temp_f} − ${minReal.temp_f})</span></div>`;
-  }
-  if (disc.max_lectura) {
-    discRows += `<div class="row muted">${disc.max_lectura}</div>`;
-  }
-  if (!discRows) {
-    discRows = `<div class="row muted">Falta max real o max modelo para calcular diferencia.</div>`;
-  }
+  if (disc.max_lectura) discRows += `<div class="row muted">${disc.max_lectura}</div>`;
+  if (disc.min_lectura) discRows += `<div class="row muted">${disc.min_lectura}</div>`;
+  if (!discRows) discRows = `<div class="row muted">Faltan datos para comparar (espera NWS o modelo).</div>`;
   const discHtml = `
     <div class="disc-box">
       <h4>Discrepancia entre fuentes</h4>
       ${discRows}
-      <p class="hint">REAL = NWS (lo que usa Kalshi). MODELO = techo WM-6 del día.
-      No se modifica ningún valor: solo se muestra cuánto se desvían.</p>
+      <p class="hint">${disc.nota || 'REAL = NWS (Kalshi). MODELO = WM-6 techo o Open-Meteo.'}</p>
     </div>`;
+  const ahoraTxt = d.ahora_f != null
+    ? `${d.ahora_f}°F${d.ahora_hora ? ' @ ' + d.ahora_hora : ''}`
+    : '—';
   el.innerHTML = `
     <div class="card">
       <h3 style="margin:0 0 4px">${d.city}</h3>
       ${fuenteTxt}
       ${metarHtml}
       ${heroHtml}
+      <div class="grid" style="margin-top:12px">
+        <div class="stat"><dt>Ahora (modelo/OM)</dt><dd>${ahoraTxt}</dd></div>
+        <div class="stat"><dt>Máx REAL</dt><dd>${maxReal ? maxReal.temp_f + '°F' : '—'}</dd></div>
+        <div class="stat"><dt>Máx MODELO</dt><dd>${maxModelo ? maxModelo.temp_f + '°F' : '—'}</dd></div>
+        <div class="stat"><dt>Mín REAL</dt><dd>${minReal ? minReal.temp_f + '°F' : '—'}</dd></div>
+        <div class="stat"><dt>Mín MODELO</dt><dd>${minModelo ? minModelo.temp_f + '°F' : '—'}</dd></div>
+      </div>
       ${discHtml}
     </div>
     <div class="card hidden" id="edge-card"></div>`;
