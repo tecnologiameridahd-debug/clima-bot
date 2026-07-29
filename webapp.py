@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.2.1-pico-dia"
+BUILD_VERSION = "v4.3-max-min"
 
 
 @app.get("/health")
@@ -158,6 +158,7 @@ def api_resumen(city_id):
 
         metar = a.get("metar")
         metar_max = a.get("metar_max_hoy")
+        metar_min = a.get("metar_min_hoy")
         hw = a.get("pico_wm6_max_hoy")
         pk = a.get("pico_kalshi")
         return jsonify(
@@ -185,6 +186,7 @@ def api_resumen(city_id):
                     else None
                 ),
                 "min_f": a["min_dia"],
+                "min_hora": (a.get("minimo") or {}).get("hora"),
                 "promedio": a["promedio"],
                 "probs_pico": {str(k): v for k, v in (a.get("probs_pico") or {}).items()},
                 "metar": (
@@ -203,6 +205,15 @@ def api_resumen(city_id):
                         "station": metar_max["station"],
                     }
                     if metar_max and metar_max.get("temp_f") is not None
+                    else None
+                ),
+                "metar_min_hoy": (
+                    {
+                        "temp_f": metar_min["temp_f"],
+                        "hora": metar_min["hora"],
+                        "station": metar_min["station"],
+                    }
+                    if metar_min and metar_min.get("temp_f") is not None
                     else None
                 ),
             }
@@ -357,15 +368,23 @@ DASHBOARD_HTML = """<!doctype html>
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; }
   .stat dt { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-soft); margin: 0 0 4px; }
   .stat dd { margin: 0; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hero-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 16px;
+  }
+  @media (max-width: 560px) { .hero-row { grid-template-columns: 1fr; } }
   .hero-pico {
-    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-    gap: 12px; padding: 16px 18px; margin: 12px 0 16px; border-radius: 10px;
+    display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; border-radius: 10px;
     background: linear-gradient(135deg, var(--accent-tint), transparent);
     border: 1px solid var(--accent);
   }
-  .hero-pico .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); margin: 0 0 4px; }
+  .hero-pico.min {
+    background: linear-gradient(135deg, var(--ok-tint), transparent);
+    border-color: var(--ok);
+  }
+  .hero-pico .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); margin: 0; }
   .hero-pico .value { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); line-height: 1.1; margin: 0; }
-  .hero-pico .sub { margin: 4px 0 0; font-size: 13px; color: var(--ink-soft); }
+  .hero-pico.min .value { color: var(--ok); }
+  .hero-pico .sub { margin: 0; font-size: 13px; color: var(--ink-soft); }
   .pill { display: inline-block; font-size: 12px; padding: 3px 9px; border-radius: 4px; margin: 2px 4px 2px 0; }
   .pill.hi { background: var(--danger-tint); color: var(--danger); }
   .pill.mid { background: var(--warn-tint); color: var(--warn); }
@@ -396,7 +415,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.2.1</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3</p>
 </header>
 <main>
   <div class="controls">
@@ -459,24 +478,30 @@ async function cargarResumen() {
     ? `<p class="muted">METAR ${d.metar.station}: <b>${d.metar.temp_f}°F</b> (hace ${d.metar.age_min} min)</p>`
     : '';
   const mm = d.metar_max_hoy;
+  const mn = d.metar_min_hoy;
   const hw = d.pico_wm6_max_hoy;
   const pk = d.pico_kalshi;
-  // Número grande: lo que importa para Kalshi (NWS max del día si hay; si no, max modelo)
-  const picoDia = pk && pk.temp_f != null
-    ? pk
-    : (mm && mm.temp_f != null
-        ? { temp_f: mm.temp_f, hora: mm.hora, fuente: 'NWS ' + (mm.station || '') }
-        : { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'WM-6 actual' });
+  // Máximo del día: NWS real (Kalshi) si hay; si no, techo/modelo
+  const maxDia = (mm && mm.temp_f != null)
+    ? { temp_f: mm.temp_f, hora: mm.hora, fuente: 'REAL NWS ' + (mm.station || '') }
+    : (pk && pk.temp_f != null
+        ? { temp_f: pk.temp_f, hora: pk.hora, fuente: pk.fuente || 'Kalshi' }
+        : { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'WM-6' });
+  // Mínimo del día: NWS real si hay; si no, mínimo del modelo
+  const minDia = (mn && mn.temp_f != null)
+    ? { temp_f: mn.temp_f, hora: mn.hora, fuente: 'REAL NWS ' + (mn.station || '') }
+    : { temp_f: d.min_f, hora: d.min_hora, fuente: 'WM-6' };
   const heroHtml = `
-    <div class="hero-pico">
-      <div>
-        <p class="label">Pico del día (Kalshi)</p>
-        <p class="value">${picoDia.temp_f != null ? picoDia.temp_f + '°F' : '—'}</p>
-        <p class="sub">${picoDia.fuente || ''}${picoDia.hora ? ' · @ ' + picoDia.hora : ''}</p>
+    <div class="hero-row">
+      <div class="hero-pico">
+        <p class="label">Máximo del día</p>
+        <p class="value">${maxDia.temp_f != null ? maxDia.temp_f + '°F' : '—'}</p>
+        <p class="sub">${maxDia.fuente || ''}${maxDia.hora ? ' · @ ' + maxDia.hora : ''}</p>
       </div>
-      <div class="muted" style="max-width:280px;font-size:12.5px;line-height:1.4">
-        Máxima real del día (NWS) cuando hay observaciones.
-        El modelo WM-6 solo pronostica y puede bajar después.
+      <div class="hero-pico min">
+        <p class="label">Mínimo del día</p>
+        <p class="value">${minDia.temp_f != null ? minDia.temp_f + '°F' : '—'}</p>
+        <p class="sub">${minDia.fuente || ''}${minDia.hora ? ' · @ ' + minDia.hora : ''}</p>
       </div>
     </div>`;
   let deltaHtml = '';
@@ -496,10 +521,8 @@ async function cargarResumen() {
       ${heroHtml}
       <div class="grid">
         <div class="stat"><dt>Ahora</dt><dd>${d.ahora_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Pico WM-6 actual</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Techo WM-6 hoy</dt><dd>${hw && hw.temp_f != null ? hw.temp_f + '°F' : '—'}</dd></div>
-        <div class="stat"><dt>Máx REAL NWS</dt><dd>${mm && mm.temp_f != null ? mm.temp_f + '°F' : '—'}</dd></div>
-        <div class="stat"><dt>Mínimo</dt><dd>${d.min_f ?? '—'}°F</dd></div>
+        <div class="stat"><dt>Pico WM-6</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
+        <div class="stat"><dt>Mín WM-6</dt><dd>${d.min_f ?? '—'}°F</dd></div>
         <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
       </div>
       ${deltaHtml}

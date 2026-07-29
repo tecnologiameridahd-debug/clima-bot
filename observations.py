@@ -82,12 +82,12 @@ def get_metar_obs(station_id, force=False):
     }
 
 
-def metar_max_hoy(station_id, tz, force=False):
-    """Máximo REAL observado hoy (NWS, misma fuente contra la que liquida Kalshi).
+def metar_extremos_hoy(station_id, tz, force=False):
+    """Máximo y mínimo REALES de hoy (NWS).
 
-    A diferencia de get_metar_obs (última lectura), esto recorre todas las
-    observaciones de hoy y devuelve la más alta — comparable directo con el
-    pico pronosticado por WM-6.
+    Una sola petición a observations: devuelve
+    {"max": {...}, "min": {...}, "station", "n_obs"} o None.
+    El max es la referencia típica de liquidación Kalshi KXHIGH.
     """
     if not station_id:
         return None
@@ -110,30 +110,76 @@ def metar_max_hoy(station_id, tz, force=False):
         r.raise_for_status()
         feats = r.json().get("features", [])
     except Exception as e:
-        print(f"  [metar_max] {station_id}: {e}")
+        print(f"  [metar_extremos] {station_id}: {e}")
         return cached["data"] if cached else None
 
     mejor = None
+    peor = None
     for f in feats:
         props = f.get("properties", {})
         temp_c = (props.get("temperature") or {}).get("value")
         ts = props.get("timestamp")
         if temp_c is None or not ts:
             continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)
+            hora_local = dt.strftime("%H:%M")
+        except ValueError:
+            hora_local = ""
+        punto = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
         if mejor is None or temp_c > mejor["temp_c"]:
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)
-                hora_local = dt.strftime("%H:%M")
-            except ValueError:
-                hora_local = ""
-            mejor = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
+            mejor = punto
+        if peor is None or temp_c < peor["temp_c"]:
+            peor = punto
 
-    if mejor is None:
+    if mejor is None and peor is None:
         return cached["data"] if cached else None
 
-    resultado = {"temp_f": mejor["temp_f"], "hora": mejor["hora"], "station": station_id, "n_obs": len(feats)}
+    resultado = {
+        "station": station_id,
+        "n_obs": len(feats),
+        "max": (
+            {"temp_f": mejor["temp_f"], "hora": mejor["hora"], "station": station_id}
+            if mejor
+            else None
+        ),
+        "min": (
+            {"temp_f": peor["temp_f"], "hora": peor["hora"], "station": station_id}
+            if peor
+            else None
+        ),
+    }
     _max_hoy_cache[clave] = {"ts": time.time(), "data": resultado}
     return resultado
+
+
+def metar_max_hoy(station_id, tz, force=False):
+    """Máximo REAL observado hoy (NWS). Compat wrapper sobre metar_extremos_hoy."""
+    ext = metar_extremos_hoy(station_id, tz, force=force)
+    if not ext:
+        return None
+    # Cache nueva forma {max,min} o legacy {temp_f,...}
+    if ext.get("max"):
+        m = dict(ext["max"])
+        m["n_obs"] = ext.get("n_obs")
+        m["station"] = ext.get("station") or m.get("station")
+        return m
+    if ext.get("temp_f") is not None:
+        return ext
+    return None
+
+
+def metar_min_hoy(station_id, tz, force=False):
+    """Mínimo REAL observado hoy (NWS)."""
+    ext = metar_extremos_hoy(station_id, tz, force=force)
+    if not ext:
+        return None
+    if ext.get("min"):
+        m = dict(ext["min"])
+        m["n_obs"] = ext.get("n_obs")
+        m["station"] = ext.get("station") or m.get("station")
+        return m
+    return None
 
 
 def metar_linea(station_id):

@@ -14,7 +14,7 @@ from api import (
 )
 from cities import DEFAULT_CITY_ID, KALSHI_CITIES, get_city
 from config import CACHE_DIR, UMBRALES_F, UMBRAL_ALERTA_CAMBIO, log_csv_path
-from observations import get_metar_obs, metar_linea, metar_max_hoy
+from observations import get_metar_obs, metar_extremos_hoy, metar_linea, metar_max_hoy
 from utils import c_to_f
 from wb_interp import enriquecer_min, enriquecer_pico, futuros_sin_repetir, texto_hora
 
@@ -243,10 +243,29 @@ def analizar(city=None, force=False):
     # sumar 20 llamadas a NWS y volver lenta la vista multi-ciudad.
     if a and city.get("station"):
         try:
-            a["metar_max_hoy"] = metar_max_hoy(city["station"], city["tz"])
+            ext = metar_extremos_hoy(city["station"], city["tz"])
+            if ext and ext.get("max"):
+                a["metar_max_hoy"] = {
+                    "temp_f": ext["max"]["temp_f"],
+                    "hora": ext["max"].get("hora"),
+                    "station": ext.get("station") or city["station"],
+                    "n_obs": ext.get("n_obs"),
+                }
+            else:
+                a["metar_max_hoy"] = None
+            if ext and ext.get("min"):
+                a["metar_min_hoy"] = {
+                    "temp_f": ext["min"]["temp_f"],
+                    "hora": ext["min"].get("hora"),
+                    "station": ext.get("station") or city["station"],
+                    "n_obs": ext.get("n_obs"),
+                }
+            else:
+                a["metar_min_hoy"] = None
         except Exception as e:
-            print(f"  [analizar] metar_max_hoy: {e}")
+            print(f"  [analizar] metar extremos: {e}")
             a["metar_max_hoy"] = None
+            a["metar_min_hoy"] = None
     return _adjuntar_pico_dia(a)
 
 
@@ -374,27 +393,36 @@ def msg_pico(a):
     lineas = "\n".join(f"≥ {u}°F → <b>{probs.get(u, 0)}%</b>" for u in [95, 96, 97, 98])
     hw = a.get("pico_wm6_max_hoy") or {}
     mm = a.get("metar_max_hoy") or {}
+    mn = a.get("metar_min_hoy") or {}
     pk = a.get("pico_kalshi") or {}
     extra = []
-    if hw.get("temp_f") is not None and hw["temp_f"] != p["temp_f"]:
-        extra.append(
-            f"Pico WM-6 más alto hoy: <b>{hw['temp_f']}°F</b> "
-            f"(corridas previas; la actual bajó a {p['temp_f']}°F)"
-        )
     if mm.get("temp_f") is not None:
         extra.append(
-            f"Máx REAL NWS ({mm.get('station', '?')}): <b>{mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
+            f"<b>MÁXIMO del día (NWS): {mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
+        )
+    if mn.get("temp_f") is not None:
+        extra.append(
+            f"<b>MÍNIMO del día (NWS): {mn['temp_f']}°F</b> @ {mn.get('hora', '?')}"
+        )
+    else:
+        extra.append(
+            f"Mínimo del día (WM-6): <b>{a.get('min_dia', '?')}°F</b>"
+        )
+    if hw.get("temp_f") is not None and hw["temp_f"] != p["temp_f"]:
+        extra.append(
+            f"Techo WM-6 hoy: <b>{hw['temp_f']}°F</b> "
+            f"(corrida actual: {p['temp_f']}°F)"
         )
     if pk.get("temp_f") is not None:
         extra.append(
             f"Referencia Kalshi: <b>{pk['temp_f']}°F</b> ({pk.get('fuente', '')})"
         )
-    extra_txt = ("\n" + "\n".join(extra) + "\n") if extra else ""
+    extra_txt = ("\n".join(extra) + "\n\n") if extra else ""
     return (
-        f"<b>{c} — PICO ({texto_hora(p)})</b>\n"
-        f"Pico WM-6 actual: <b>{p['temp_f']}°F</b>\n"
-        f"<i>(última corrida, {a['slots_3h']} puntos cada 3h)</i>\n"
+        f"<b>{c} — MÁX / MÍN DEL DÍA</b>\n"
         f"{extra_txt}"
+        f"Pico WM-6 actual: <b>{p['temp_f']}°F</b> ({texto_hora(p)})\n"
+        f"<i>(última corrida, {a['slots_3h']} puntos cada 3h)</i>\n"
         f"Rango p25–p75: {d.get('p25', '?')}–{d.get('p75', '?')}°F\n"
         f"Rango p10–p90: {d.get('p10', '?')}–{d.get('p90', '?')}°F\n\n"
         f"<b>Probabilidades IA en el pico actual:</b>\n{lineas}"
@@ -467,17 +495,29 @@ def msg_resumen(a):
             f"(no baja si el modelo revisa a la baja)"
         )
     mm = a.get("metar_max_hoy")
+    mn = a.get("metar_min_hoy")
     if mm and mm.get("temp_f") is not None:
         lineas.append(
-            f"Máx REAL hoy (NWS {mm['station']}): <b>{mm['temp_f']}°F</b> @ {mm['hora']}"
+            f"<b>MÁXIMO del día (NWS {mm.get('station', '?')}): {mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
+        )
+    else:
+        lineas.append(
+            f"Máximo del día (WM-6): <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})"
+        )
+    if mn and mn.get("temp_f") is not None:
+        lineas.append(
+            f"<b>MÍNIMO del día (NWS {mn.get('station', '?')}): {mn['temp_f']}°F</b> @ {mn.get('hora', '?')}"
+        )
+    else:
+        lineas.append(
+            f"Mínimo del día (WM-6): <b>{a['min_dia']}°F</b> ({texto_hora(a.get('minimo') or {})})"
         )
     pk = a.get("pico_kalshi")
     if pk and pk.get("temp_f") is not None:
         lineas.append(
-            f"Pico del día (Kalshi): <b>{pk['temp_f']}°F</b> — {pk.get('fuente', '')}"
+            f"Pico Kalshi: <b>{pk['temp_f']}°F</b> — {pk.get('fuente', '')}"
         )
     lineas += [
-        f"Mínimo del día: <b>{a['min_dia']}°F</b> ({texto_hora(a.get('minimo') or {})})",
         f"Promedio slots: {a['promedio']}°F · {a['slots_3h']} puntos/3h",
         "",
         f"P≥97°: <b>{a['probs_pico'].get(97, 0)}%</b>  "
