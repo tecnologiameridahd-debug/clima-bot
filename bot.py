@@ -220,7 +220,8 @@ def handle(texto, chat_id):
     cmd, city_id, args = _parse(texto)
 
     if cmd in ("start", "help"):
-        enviar(chat_id, _help(_ciudad_chat(chat_id)), parse_mode=None)
+        # _help usa <b>/<code>; parse_mode HTML por defecto de enviar()
+        enviar(chat_id, _help(_ciudad_chat(chat_id)))
         return
 
     if cmd in ("status", "estado"):
@@ -235,7 +236,7 @@ def handle(texto, chat_id):
         return
 
     if cmd == "ciudades":
-        enviar(chat_id, lista_ciudades_texto(), parse_mode=None)
+        enviar(chat_id, lista_ciudades_texto())
         return
 
     if cmd == "ciudad":
@@ -246,7 +247,6 @@ def handle(texto, chat_id):
                 chat_id,
                 f"Ciudad activa: <b>{c['nombre']}</b> ({c['serie']})\n"
                 f"Usa /ciudad miami para cambiar.",
-                parse_mode=None,
             )
             return
         nombre = " ".join(args)
@@ -264,7 +264,6 @@ def handle(texto, chat_id):
         enviar(
             chat_id,
             f"✅ Ciudad activa: <b>{c['nombre']}</b> ({c['serie']} · {c['station']})",
-            parse_mode=None,
         )
         return
 
@@ -278,7 +277,6 @@ def handle(texto, chat_id):
             enviar(
                 chat_id,
                 f"🔔 Monitor ON — {c['nombre']}. Alerta si el pico cambia ≥1°F.",
-                parse_mode=None,
             )
         return
 

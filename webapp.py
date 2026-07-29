@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "debug-lock-trace-1"
+BUILD_VERSION = "v4.1-pico-dia"
 
 
 @app.get("/health")
@@ -122,6 +122,8 @@ def api_resumen(city_id):
     log_peak(a)
     metar = a.get("metar")
     metar_max = a.get("metar_max_hoy")
+    hw = a.get("pico_wm6_max_hoy")
+    pk = a.get("pico_kalshi")
     return jsonify(
         {
             "city": city["nombre"],
@@ -132,6 +134,20 @@ def api_resumen(city_id):
             "ahora_hora": a["ahora"]["hora"],
             "pico_f": a["pico"]["temp_f"],
             "pico_hora": a["pico"]["hora"],
+            "pico_wm6_max_hoy": (
+                {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
+                if hw and hw.get("temp_f") is not None
+                else None
+            ),
+            "pico_kalshi": (
+                {
+                    "temp_f": pk["temp_f"],
+                    "hora": pk.get("hora"),
+                    "fuente": pk.get("fuente"),
+                }
+                if pk and pk.get("temp_f") is not None
+                else None
+            ),
             "min_f": a["min_dia"],
             "promedio": a["promedio"],
             "probs_pico": a["probs_pico"],
@@ -197,6 +213,7 @@ def api_kalshi():
     for a in resultados:
         c = a["city"]
         m = a.get("metar")
+        hw = a.get("pico_wm6_max_hoy") or {}
         salida.append(
             {
                 "id": c["id"],
@@ -204,6 +221,7 @@ def api_kalshi():
                 "serie": c.get("serie"),
                 "pico_f": a["pico"]["temp_f"],
                 "pico_hora": a["pico"]["hora"],
+                "pico_max_hoy": hw.get("temp_f"),
                 "prob97": a["probs_pico"].get(97, 0),
                 "prob98": a["probs_pico"].get(98, 0),
                 "metar_f": m["temp_f"] if m and m.get("temp_f") is not None else None,
@@ -385,14 +403,28 @@ async function cargarResumen() {
     ? `<p class="muted">METAR ${d.metar.station}: <b>${d.metar.temp_f}°F</b> (hace ${d.metar.age_min} min)</p>`
     : '';
   const mm = d.metar_max_hoy;
+  const hw = d.pico_wm6_max_hoy;
+  const pk = d.pico_kalshi;
   const maxRealTile = mm
     ? `<div class="stat"><dt>Máx REAL hoy (NWS)</dt><dd>${mm.temp_f}°F</dd></div>`
     : `<div class="stat"><dt>Máx REAL hoy (NWS)</dt><dd class="muted" style="font-size:14px">sin datos</dd></div>`;
+  const hwTile = hw
+    ? `<div class="stat"><dt>Pico WM-6 max hoy</dt><dd>${hw.temp_f}°F</dd></div>`
+    : '';
+  const kalshiTile = pk
+    ? `<div class="stat"><dt>Pico del día (Kalshi)</dt><dd>${pk.temp_f}°F</dd></div>`
+    : '';
   let deltaHtml = '';
   if (mm && d.pico_f != null) {
     const delta = Math.round((d.pico_f - mm.temp_f) * 10) / 10;
     const signo = delta >= 0 ? '+' : '';
-    deltaHtml = `<p class="muted" style="margin-top:10px">WM-6 vs real (NWS ${mm.station} @ ${mm.hora}): <b>${signo}${delta}°F</b></p>`;
+    deltaHtml = `<p class="muted" style="margin-top:10px">WM-6 actual vs real (NWS ${mm.station} @ ${mm.hora}): <b>${signo}${delta}°F</b></p>`;
+  }
+  if (hw && d.pico_f != null && hw.temp_f !== d.pico_f) {
+    deltaHtml += `<p class="muted">El modelo revisó a la baja: max hoy <b>${hw.temp_f}°F</b> → actual <b>${d.pico_f}°F</b></p>`;
+  }
+  if (pk && pk.fuente) {
+    deltaHtml += `<p class="muted">Referencia Kalshi: <b>${pk.temp_f}°F</b> (${pk.fuente})</p>`;
   }
   el.innerHTML = `
     <div class="card">
@@ -401,8 +433,10 @@ async function cargarResumen() {
       ${metarHtml}
       <div class="grid">
         <div class="stat"><dt>Ahora</dt><dd>${d.ahora_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Pico WM-6</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
+        <div class="stat"><dt>Pico WM-6 actual</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
+        ${hwTile}
         ${maxRealTile}
+        ${kalshiTile}
         <div class="stat"><dt>Mínimo</dt><dd>${d.min_f ?? '—'}°F</dd></div>
         <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
       </div>
@@ -442,22 +476,26 @@ async function cargarKalshi() {
   el.innerHTML = '<p class="muted">Consultando 20 ciudades (1 llamada API)…</p>';
   const r = await fetch('/api/kalshi');
   const d = await r.json();
-  const filas = (d.ciudades || []).map(c => `
+  const filas = (d.ciudades || []).map(c => {
+    const maxHoy = (c.pico_max_hoy != null && c.pico_max_hoy !== c.pico_f)
+      ? ` <span class="muted">(max ${c.pico_max_hoy})</span>` : '';
+    return `
     <tr data-city="${c.id}">
       <td><b>${c.nombre}</b></td>
-      <td>${c.pico_f}°F</td>
+      <td>${c.pico_f}°F${maxHoy}</td>
       <td>${c.pico_hora}</td>
       <td><span class="pill ${pillClass(c.prob97)}">${c.prob97}%</span></td>
       <td>${c.metar_f != null ? c.metar_f + '°F' : '—'}</td>
-    </tr>`).join('');
-  const erroresHtml = d.errores && Object.keys(d.errores).length
-    ? `<p class="muted" style="margin-top:10px">Sin datos: ${Object.keys(d.errores).join(', ')}</p>`
+    </tr>`;
+  }).join('');
+  const erroresHtml = (Array.isArray(d.errores) ? d.errores.length : d.errores && Object.keys(d.errores).length)
+    ? `<p class="muted" style="margin-top:10px">Sin datos: ${Array.isArray(d.errores) ? d.errores.join(', ') : Object.keys(d.errores).join(', ')}</p>`
     : '';
   el.innerHTML = `
     <div class="card">
       <div class="table-wrap">
         <table class="kalshi">
-          <thead><tr><th>Ciudad</th><th>Pico</th><th>Hora</th><th>P≥97°F</th><th>METAR real</th></tr></thead>
+          <thead><tr><th>Ciudad</th><th>Pico WM-6</th><th>Hora</th><th>P≥97°F</th><th>METAR real</th></tr></thead>
           <tbody>${filas}</tbody>
         </table>
       </div>
