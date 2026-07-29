@@ -242,7 +242,11 @@ def analizar(city=None, force=False):
     # Solo para 1 ciudad: en analizar_todas (20 a la vez) se omite para no
     # sumar 20 llamadas a NWS y volver lenta la vista multi-ciudad.
     if a and city.get("station"):
-        a["metar_max_hoy"] = metar_max_hoy(city["station"], city["tz"])
+        try:
+            a["metar_max_hoy"] = metar_max_hoy(city["station"], city["tz"])
+        except Exception as e:
+            print(f"  [analizar] metar_max_hoy: {e}")
+            a["metar_max_hoy"] = None
     return _adjuntar_pico_dia(a)
 
 
