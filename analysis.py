@@ -398,21 +398,21 @@ def msg_pico(a):
     extra = []
     if mm.get("temp_f") is not None:
         extra.append(
-            f"<b>MÁXIMO del día (NWS): {mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
+            f"<b>MÁX REAL del día (NWS): {mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
+        )
+    if hw.get("temp_f") is not None:
+        extra.append(
+            f"<b>MÁX MODELO registrado (WM-6): {hw['temp_f']}°F</b>"
+            + (f" @ {hw.get('hora')}" if hw.get("hora") else "")
+            + (f" · corrida actual {p['temp_f']}°F" if hw.get("temp_f") != p["temp_f"] else "")
         )
     if mn.get("temp_f") is not None:
         extra.append(
-            f"<b>MÍNIMO del día (NWS): {mn['temp_f']}°F</b> @ {mn.get('hora', '?')}"
+            f"<b>MÍN REAL del día (NWS): {mn['temp_f']}°F</b> @ {mn.get('hora', '?')}"
         )
-    else:
-        extra.append(
-            f"Mínimo del día (WM-6): <b>{a.get('min_dia', '?')}°F</b>"
-        )
-    if hw.get("temp_f") is not None and hw["temp_f"] != p["temp_f"]:
-        extra.append(
-            f"Techo WM-6 hoy: <b>{hw['temp_f']}°F</b> "
-            f"(corrida actual: {p['temp_f']}°F)"
-        )
+    extra.append(
+        f"Mín modelo (WM-6): <b>{a.get('min_dia', '?')}°F</b>"
+    )
     if pk.get("temp_f") is not None:
         extra.append(
             f"Referencia Kalshi: <b>{pk['temp_f']}°F</b> ({pk.get('fuente', '')})"
@@ -496,22 +496,27 @@ def msg_resumen(a):
         )
     mm = a.get("metar_max_hoy")
     mn = a.get("metar_min_hoy")
+    hw = a.get("pico_wm6_max_hoy")
     if mm and mm.get("temp_f") is not None:
         lineas.append(
-            f"<b>MÁXIMO del día (NWS {mm.get('station', '?')}): {mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
+            f"<b>MÁX REAL del día (NWS {mm.get('station', '?')}): {mm['temp_f']}°F</b> @ {mm.get('hora', '?')}"
         )
-    else:
+    if hw and hw.get("temp_f") is not None:
         lineas.append(
-            f"Máximo del día (WM-6): <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})"
+            f"<b>MÁX MODELO registrado (WM-6): {hw['temp_f']}°F</b>"
+            + (f" @ {hw.get('hora')}" if hw.get("hora") else "")
+        )
+    elif a.get("pico"):
+        lineas.append(
+            f"Máx modelo (corrida actual): <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})"
         )
     if mn and mn.get("temp_f") is not None:
         lineas.append(
-            f"<b>MÍNIMO del día (NWS {mn.get('station', '?')}): {mn['temp_f']}°F</b> @ {mn.get('hora', '?')}"
+            f"<b>MÍN REAL del día (NWS {mn.get('station', '?')}): {mn['temp_f']}°F</b> @ {mn.get('hora', '?')}"
         )
-    else:
-        lineas.append(
-            f"Mínimo del día (WM-6): <b>{a['min_dia']}°F</b> ({texto_hora(a.get('minimo') or {})})"
-        )
+    lineas.append(
+        f"Mín modelo (WM-6): <b>{a['min_dia']}°F</b> ({texto_hora(a.get('minimo') or {})})"
+    )
     pk = a.get("pico_kalshi")
     if pk and pk.get("temp_f") is not None:
         lineas.append(

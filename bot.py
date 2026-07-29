@@ -199,6 +199,18 @@ def _prefetch_loop():
                 continue
             fetch_all_cities_forecast(force=True)
             fetch_all_metar(force=True)
+            # Registrar techo WM-6 del día (high-water) para cada ciudad
+            try:
+                from analysis import analizar_todas, log_peak
+
+                resultados, _err = analizar_todas(force=False)
+                for a in resultados:
+                    try:
+                        log_peak(a)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"Prefetch log_peak: {e}")
             print("✓ WM-6 + METAR actualizados (20 ciudades)")
         except Exception as e:
             print(f"Prefetch error: {e}")

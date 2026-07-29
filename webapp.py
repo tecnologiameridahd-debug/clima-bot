@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3-max-min"
+BUILD_VERSION = "v4.3.1-max-modelo"
 
 
 @app.get("/health")
@@ -371,7 +371,7 @@ DASHBOARD_HTML = """<!doctype html>
   .hero-row {
     display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 16px;
   }
-  @media (max-width: 560px) { .hero-row { grid-template-columns: 1fr; } }
+  @media (max-width: 640px) { .hero-row { grid-template-columns: 1fr; } }
   .hero-pico {
     display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; border-radius: 10px;
     background: linear-gradient(135deg, var(--accent-tint), transparent);
@@ -381,9 +381,14 @@ DASHBOARD_HTML = """<!doctype html>
     background: linear-gradient(135deg, var(--ok-tint), transparent);
     border-color: var(--ok);
   }
+  .hero-pico.model {
+    background: linear-gradient(135deg, var(--warn-tint), transparent);
+    border-color: var(--warn);
+  }
   .hero-pico .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); margin: 0; }
-  .hero-pico .value { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); line-height: 1.1; margin: 0; }
+  .hero-pico .value { font-size: 36px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); line-height: 1.1; margin: 0; }
   .hero-pico.min .value { color: var(--ok); }
+  .hero-pico.model .value { color: var(--warn); }
   .hero-pico .sub { margin: 0; font-size: 13px; color: var(--ink-soft); }
   .pill { display: inline-block; font-size: 12px; padding: 3px 9px; border-radius: 4px; margin: 2px 4px 2px 0; }
   .pill.hi { background: var(--danger-tint); color: var(--danger); }
@@ -415,7 +420,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.1</p>
 </header>
 <main>
   <div class="controls">
@@ -480,38 +485,52 @@ async function cargarResumen() {
   const mm = d.metar_max_hoy;
   const mn = d.metar_min_hoy;
   const hw = d.pico_wm6_max_hoy;
-  const pk = d.pico_kalshi;
-  // Máximo del día: NWS real (Kalshi) si hay; si no, techo/modelo
-  const maxDia = (mm && mm.temp_f != null)
+  // Máx real NWS (Kalshi) y máx modelo REGISTRADO (techo WM-6 del día, no baja)
+  const maxReal = (mm && mm.temp_f != null)
     ? { temp_f: mm.temp_f, hora: mm.hora, fuente: 'REAL NWS ' + (mm.station || '') }
-    : (pk && pk.temp_f != null
-        ? { temp_f: pk.temp_f, hora: pk.hora, fuente: pk.fuente || 'Kalshi' }
-        : { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'WM-6' });
-  // Mínimo del día: NWS real si hay; si no, mínimo del modelo
-  const minDia = (mn && mn.temp_f != null)
+    : null;
+  const maxModelo = (hw && hw.temp_f != null)
+    ? { temp_f: hw.temp_f, hora: hw.hora, fuente: 'Techo WM-6 del día (registrado)' }
+    : (d.pico_f != null
+        ? { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'WM-6 corrida actual' }
+        : null);
+  const minReal = (mn && mn.temp_f != null)
     ? { temp_f: mn.temp_f, hora: mn.hora, fuente: 'REAL NWS ' + (mn.station || '') }
-    : { temp_f: d.min_f, hora: d.min_hora, fuente: 'WM-6' };
+    : null;
+  const minModelo = (d.min_f != null)
+    ? { temp_f: d.min_f, hora: d.min_hora, fuente: 'WM-6 del día' }
+    : null;
   const heroHtml = `
     <div class="hero-row">
       <div class="hero-pico">
-        <p class="label">Máximo del día</p>
-        <p class="value">${maxDia.temp_f != null ? maxDia.temp_f + '°F' : '—'}</p>
-        <p class="sub">${maxDia.fuente || ''}${maxDia.hora ? ' · @ ' + maxDia.hora : ''}</p>
+        <p class="label">Máximo REAL del día</p>
+        <p class="value">${maxReal ? maxReal.temp_f + '°F' : '—'}</p>
+        <p class="sub">${maxReal ? ((maxReal.fuente || '') + (maxReal.hora ? ' · @ ' + maxReal.hora : '')) : 'sin obs NWS aún'}</p>
+      </div>
+      <div class="hero-pico model">
+        <p class="label">Máximo MODELO registrado</p>
+        <p class="value">${maxModelo ? maxModelo.temp_f + '°F' : '—'}</p>
+        <p class="sub">${maxModelo ? ((maxModelo.fuente || '') + (maxModelo.hora ? ' · @ ' + maxModelo.hora : '')) : '—'}</p>
       </div>
       <div class="hero-pico min">
-        <p class="label">Mínimo del día</p>
-        <p class="value">${minDia.temp_f != null ? minDia.temp_f + '°F' : '—'}</p>
-        <p class="sub">${minDia.fuente || ''}${minDia.hora ? ' · @ ' + minDia.hora : ''}</p>
+        <p class="label">Mínimo REAL del día</p>
+        <p class="value">${minReal ? minReal.temp_f + '°F' : '—'}</p>
+        <p class="sub">${minReal ? ((minReal.fuente || '') + (minReal.hora ? ' · @ ' + minReal.hora : '')) : 'sin obs NWS aún'}</p>
+      </div>
+      <div class="hero-pico model">
+        <p class="label">Mínimo MODELO</p>
+        <p class="value">${minModelo ? minModelo.temp_f + '°F' : '—'}</p>
+        <p class="sub">${minModelo ? ((minModelo.fuente || '') + (minModelo.hora ? ' · @ ' + minModelo.hora : '')) : '—'}</p>
       </div>
     </div>`;
   let deltaHtml = '';
-  if (mm && d.pico_f != null) {
-    const delta = Math.round((d.pico_f - mm.temp_f) * 10) / 10;
+  if (maxReal && maxModelo && maxReal.temp_f != null && maxModelo.temp_f != null) {
+    const delta = Math.round((maxModelo.temp_f - maxReal.temp_f) * 10) / 10;
     const signo = delta >= 0 ? '+' : '';
-    deltaHtml = `<p class="muted" style="margin-top:10px">WM-6 actual vs max real NWS: <b>${signo}${delta}°F</b></p>`;
+    deltaHtml = `<p class="muted" style="margin-top:10px">Modelo max vs real max: <b>${signo}${delta}°F</b></p>`;
   }
   if (hw && d.pico_f != null && Number(hw.temp_f) !== Number(d.pico_f)) {
-    deltaHtml += `<p class="muted">Modelo revisó a la baja: techo WM-6 hoy <b>${hw.temp_f}°F</b> → actual <b>${d.pico_f}°F</b></p>`;
+    deltaHtml += `<p class="muted">WM-6 revisó a la baja: registrado <b>${hw.temp_f}°F</b> → corrida actual <b>${d.pico_f}°F</b></p>`;
   }
   el.innerHTML = `
     <div class="card">
@@ -521,8 +540,7 @@ async function cargarResumen() {
       ${heroHtml}
       <div class="grid">
         <div class="stat"><dt>Ahora</dt><dd>${d.ahora_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Pico WM-6</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Mín WM-6</dt><dd>${d.min_f ?? '—'}°F</dd></div>
+        <div class="stat"><dt>Pico WM-6 actual</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
         <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
       </div>
       ${deltaHtml}
