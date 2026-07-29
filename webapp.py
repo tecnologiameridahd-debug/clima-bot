@@ -121,6 +121,7 @@ def api_resumen(city_id):
 
     log_peak(a)
     metar = a.get("metar")
+    metar_max = a.get("metar_max_hoy")
     return jsonify(
         {
             "city": city["nombre"],
@@ -137,6 +138,11 @@ def api_resumen(city_id):
             "metar": (
                 {"temp_f": metar["temp_f"], "age_min": metar["age_min"], "station": metar["station"]}
                 if metar and metar.get("temp_f") is not None
+                else None
+            ),
+            "metar_max_hoy": (
+                {"temp_f": metar_max["temp_f"], "hora": metar_max["hora"], "station": metar_max["station"]}
+                if metar_max and metar_max.get("temp_f") is not None
                 else None
             ),
         }
@@ -378,6 +384,16 @@ async function cargarResumen() {
   const metarHtml = d.metar
     ? `<p class="muted">METAR ${d.metar.station}: <b>${d.metar.temp_f}°F</b> (hace ${d.metar.age_min} min)</p>`
     : '';
+  const mm = d.metar_max_hoy;
+  const maxRealTile = mm
+    ? `<div class="stat"><dt>Máx REAL hoy (NWS)</dt><dd>${mm.temp_f}°F</dd></div>`
+    : `<div class="stat"><dt>Máx REAL hoy (NWS)</dt><dd class="muted" style="font-size:14px">sin datos</dd></div>`;
+  let deltaHtml = '';
+  if (mm && d.pico_f != null) {
+    const delta = Math.round((d.pico_f - mm.temp_f) * 10) / 10;
+    const signo = delta >= 0 ? '+' : '';
+    deltaHtml = `<p class="muted" style="margin-top:10px">WM-6 vs real (NWS ${mm.station} @ ${mm.hora}): <b>${signo}${delta}°F</b></p>`;
+  }
   el.innerHTML = `
     <div class="card">
       <h3>${d.city}</h3>
@@ -385,10 +401,12 @@ async function cargarResumen() {
       ${metarHtml}
       <div class="grid">
         <div class="stat"><dt>Ahora</dt><dd>${d.ahora_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Pico hoy</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
+        <div class="stat"><dt>Pico WM-6</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
+        ${maxRealTile}
         <div class="stat"><dt>Mínimo</dt><dd>${d.min_f ?? '—'}°F</dd></div>
         <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
       </div>
+      ${deltaHtml}
       ${pillsHtml ? `<p style="margin-top:16px">${pillsHtml}</p>` : ''}
     </div>
     <div class="card" id="edge-card">

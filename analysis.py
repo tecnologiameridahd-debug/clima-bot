@@ -12,7 +12,7 @@ from api import (
 )
 from cities import DEFAULT_CITY_ID, KALSHI_CITIES, get_city
 from config import UMBRALES_F, UMBRAL_ALERTA_CAMBIO, log_csv_path
-from observations import get_metar_obs, metar_linea
+from observations import get_metar_obs, metar_linea, metar_max_hoy
 from utils import c_to_f
 from wb_interp import enriquecer_min, enriquecer_pico, futuros_sin_repetir, texto_hora
 
@@ -74,6 +74,7 @@ def analizar_desde_raw(raw, city):
         "modelo_hace_min": modelo_hace_min,
         "consulta_seg": consulta_seg,
         "metar": metar,
+        "metar_max_hoy": None,
         "ahora": punto_ahora,
         "pico": punto_pico,
         "minimo": punto_min,
@@ -92,7 +93,12 @@ def analizar_desde_raw(raw, city):
 def analizar(city=None, force=False):
     city = city or get_city(DEFAULT_CITY_ID)
     raw = fetch_forecast(city=city, force=force)
-    return analizar_desde_raw(raw, city)
+    a = analizar_desde_raw(raw, city)
+    # Solo para 1 ciudad: en analizar_todas (20 a la vez) se omite para no
+    # sumar 20 llamadas a NWS y volver lenta la vista multi-ciudad.
+    if a and city.get("station"):
+        a["metar_max_hoy"] = metar_max_hoy(city["station"], city["tz"])
+    return a
 
 
 def analizar_todas(force=False):
@@ -277,7 +283,14 @@ def msg_resumen(a):
     lineas += [
         "",
         f"Pronóstico ahora: <b>{a['ahora']['temp_f']}°F</b> ({a['ahora']['hora']})",
-        f"Pico del día: <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})",
+        f"Pico del día (WM-6): <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})",
+    ]
+    mm = a.get("metar_max_hoy")
+    if mm and mm.get("temp_f") is not None:
+        lineas.append(
+            f"Máx REAL hoy (NWS {mm['station']}): <b>{mm['temp_f']}°F</b> @ {mm['hora']}"
+        )
+    lineas += [
         f"Mínimo del día: <b>{a['min_dia']}°F</b> ({texto_hora(a.get('minimo') or {})})",
         f"Promedio slots: {a['promedio']}°F · {a['slots_3h']} puntos/3h",
         "",

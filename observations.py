@@ -9,6 +9,13 @@ from utils import c_to_f as _c_to_f
 METAR_TTL = 120
 _metar_cache = {"ts": 0, "by_station": {}}
 
+NWS_HEADERS = {
+    "User-Agent": "WindBorneMonitor (alberto@example.com)",
+    "Accept": "application/geo+json",
+}
+MAX_HOY_TTL = 300  # 5 min — el maximo real del dia solo puede subir
+_max_hoy_cache = {}
+
 
 def fetch_all_metar(force=False):
     if not force and _metar_cache["by_station"] and time.time() - _metar_cache["ts"] < METAR_TTL:
@@ -73,6 +80,60 @@ def get_metar_obs(station_id, force=False):
         "station": station_id.upper(),
         "raw_type": row.get("metarType", "METAR"),
     }
+
+
+def metar_max_hoy(station_id, tz, force=False):
+    """Máximo REAL observado hoy (NWS, misma fuente contra la que liquida Kalshi).
+
+    A diferencia de get_metar_obs (última lectura), esto recorre todas las
+    observaciones de hoy y devuelve la más alta — comparable directo con el
+    pico pronosticado por WM-6.
+    """
+    if not station_id:
+        return None
+    station_id = station_id.upper()
+    clave = f"{station_id}:{datetime.now(tz).strftime('%Y-%m-%d')}"
+
+    cached = _max_hoy_cache.get(clave)
+    if not force and cached and time.time() - cached["ts"] < MAX_HOY_TTL:
+        return cached["data"]
+
+    try:
+        inicio = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        start = inicio.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        r = requests.get(
+            f"https://api.weather.gov/stations/{station_id}/observations",
+            params={"start": start, "limit": 500},
+            headers=NWS_HEADERS,
+            timeout=20,
+        )
+        r.raise_for_status()
+        feats = r.json().get("features", [])
+    except Exception as e:
+        print(f"  [metar_max] {station_id}: {e}")
+        return cached["data"] if cached else None
+
+    mejor = None
+    for f in feats:
+        props = f.get("properties", {})
+        temp_c = (props.get("temperature") or {}).get("value")
+        ts = props.get("timestamp")
+        if temp_c is None or not ts:
+            continue
+        if mejor is None or temp_c > mejor["temp_c"]:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)
+                hora_local = dt.strftime("%H:%M")
+            except ValueError:
+                hora_local = ""
+            mejor = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
+
+    if mejor is None:
+        return cached["data"] if cached else None
+
+    resultado = {"temp_f": mejor["temp_f"], "hora": mejor["hora"], "station": station_id, "n_obs": len(feats)}
+    _max_hoy_cache[clave] = {"ts": time.time(), "data": resultado}
+    return resultado
 
 
 def metar_linea(station_id):
