@@ -1,7 +1,9 @@
 import csv
+import json
 import math
 import os
 from datetime import datetime
+from pathlib import Path
 
 from api import (
     batch_cache_age,
@@ -11,10 +13,12 @@ from api import (
     get_points_hoy,
 )
 from cities import DEFAULT_CITY_ID, KALSHI_CITIES, get_city
-from config import UMBRALES_F, UMBRAL_ALERTA_CAMBIO, log_csv_path
+from config import CACHE_DIR, UMBRALES_F, UMBRAL_ALERTA_CAMBIO, log_csv_path
 from observations import get_metar_obs, metar_linea, metar_max_hoy
 from utils import c_to_f
 from wb_interp import enriquecer_min, enriquecer_pico, futuros_sin_repetir, texto_hora
+
+_HW_JSON = Path(CACHE_DIR) / "pico_highwater.json"
 
 
 def dist_f(dist):
@@ -105,15 +109,65 @@ def _leer_filas_log(city_id):
             return []
 
 
+def _load_hw_disk():
+    try:
+        if _HW_JSON.exists():
+            return json.loads(_HW_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_hw_disk(store):
+    try:
+        _HW_JSON.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"  [hw] save fail: {e}")
+
+
+def _actualizar_highwater(city_id, fecha, temp_f, hora=None):
+    """Sube (nunca baja) el techo WM-6 del día y lo persiste en disco."""
+    if temp_f is None:
+        return None
+    try:
+        tf = float(temp_f)
+    except (TypeError, ValueError):
+        return None
+    store = _load_hw_disk()
+    key = f"{city_id}:{fecha}"
+    prev = store.get(key) or {}
+    prev_f = prev.get("temp_f")
+    if prev_f is None or tf > float(prev_f):
+        store[key] = {"temp_f": round(tf, 1), "hora": hora or prev.get("hora") or "?"}
+        # Limpiar días viejos (dejar solo fecha actual por ciudad)
+        pref = f"{city_id}:"
+        for k in list(store.keys()):
+            if k.startswith(pref) and k != key:
+                del store[k]
+        _save_hw_disk(store)
+        return store[key]
+    return {
+        "temp_f": round(float(prev_f), 1),
+        "hora": prev.get("hora") or hora or "?",
+    }
+
+
 def pico_wm6_max_hoy(city_id, fecha, pico_actual=None, hora_actual=None):
     """Máximo pico WM-6 visto hoy (high-water mark).
 
-    El modelo se re-corre y a veces baja el pico de la tarde. Para Kalshi
-    conviene recordar el techo que el modelo llegó a dar en el día, no solo
-    la última corrida.
+    Fuentes (la más alta gana):
+    1) JSON en cache/ (sobrevive entre requests en el mismo deploy)
+    2) CSV de logs históricos del día
+    3) Pico de la corrida actual
     """
     mejor_f = None
     mejor_hora = None
+
+    disk = (_load_hw_disk().get(f"{city_id}:{fecha}") or {})
+    if disk.get("temp_f") is not None:
+        mejor_f = float(disk["temp_f"])
+        mejor_hora = disk.get("hora") or mejor_hora
+
     for row in _leer_filas_log(city_id):
         ts = row.get("time") or ""
         if not ts.startswith(fecha):
@@ -125,6 +179,7 @@ def pico_wm6_max_hoy(city_id, fecha, pico_actual=None, hora_actual=None):
         if mejor_f is None or pf > mejor_f:
             mejor_f = pf
             mejor_hora = row.get("pico_hora") or mejor_hora
+
     if pico_actual is not None:
         try:
             pa = float(pico_actual)
@@ -133,9 +188,12 @@ def pico_wm6_max_hoy(city_id, fecha, pico_actual=None, hora_actual=None):
         if pa is not None and (mejor_f is None or pa > mejor_f):
             mejor_f = pa
             mejor_hora = hora_actual or mejor_hora
+
     if mejor_f is None:
         return None
-    return {"temp_f": round(mejor_f, 1), "hora": mejor_hora or "?"}
+
+    # Persistir el techo actualizado
+    return _actualizar_highwater(city_id, fecha, mejor_f, mejor_hora)
 
 
 def _adjuntar_pico_dia(a):

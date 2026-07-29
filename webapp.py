@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.1-pico-dia"
+BUILD_VERSION = "v4.2-pico-dia"
 
 
 @app.get("/health")
@@ -310,6 +310,15 @@ DASHBOARD_HTML = """<!doctype html>
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; }
   .stat dt { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-soft); margin: 0 0 4px; }
   .stat dd { margin: 0; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hero-pico {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 16px 18px; margin: 12px 0 16px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent-tint), transparent);
+    border: 1px solid var(--accent);
+  }
+  .hero-pico .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); margin: 0 0 4px; }
+  .hero-pico .value { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); line-height: 1.1; margin: 0; }
+  .hero-pico .sub { margin: 4px 0 0; font-size: 13px; color: var(--ink-soft); }
   .pill { display: inline-block; font-size: 12px; padding: 3px 9px; border-radius: 4px; margin: 2px 4px 2px 0; }
   .pill.hi { background: var(--danger-tint); color: var(--danger); }
   .pill.mid { background: var(--warn-tint); color: var(--warn); }
@@ -340,7 +349,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.2</p>
 </header>
 <main>
   <div class="controls">
@@ -405,38 +414,44 @@ async function cargarResumen() {
   const mm = d.metar_max_hoy;
   const hw = d.pico_wm6_max_hoy;
   const pk = d.pico_kalshi;
-  const maxRealTile = mm
-    ? `<div class="stat"><dt>Máx REAL hoy (NWS)</dt><dd>${mm.temp_f}°F</dd></div>`
-    : `<div class="stat"><dt>Máx REAL hoy (NWS)</dt><dd class="muted" style="font-size:14px">sin datos</dd></div>`;
-  const hwTile = hw
-    ? `<div class="stat"><dt>Pico WM-6 max hoy</dt><dd>${hw.temp_f}°F</dd></div>`
-    : '';
-  const kalshiTile = pk
-    ? `<div class="stat"><dt>Pico del día (Kalshi)</dt><dd>${pk.temp_f}°F</dd></div>`
-    : '';
+  // Número grande: lo que importa para Kalshi (NWS max del día si hay; si no, max modelo)
+  const picoDia = pk && pk.temp_f != null
+    ? pk
+    : (mm && mm.temp_f != null
+        ? { temp_f: mm.temp_f, hora: mm.hora, fuente: 'NWS ' + (mm.station || '') }
+        : { temp_f: d.pico_f, hora: d.pico_hora, fuente: 'WM-6 actual' });
+  const heroHtml = `
+    <div class="hero-pico">
+      <div>
+        <p class="label">Pico del día (Kalshi)</p>
+        <p class="value">${picoDia.temp_f != null ? picoDia.temp_f + '°F' : '—'}</p>
+        <p class="sub">${picoDia.fuente || ''}${picoDia.hora ? ' · @ ' + picoDia.hora : ''}</p>
+      </div>
+      <div class="muted" style="max-width:280px;font-size:12.5px;line-height:1.4">
+        Máxima real del día (NWS) cuando hay observaciones.
+        El modelo WM-6 solo pronostica y puede bajar después.
+      </div>
+    </div>`;
   let deltaHtml = '';
   if (mm && d.pico_f != null) {
     const delta = Math.round((d.pico_f - mm.temp_f) * 10) / 10;
     const signo = delta >= 0 ? '+' : '';
-    deltaHtml = `<p class="muted" style="margin-top:10px">WM-6 actual vs real (NWS ${mm.station} @ ${mm.hora}): <b>${signo}${delta}°F</b></p>`;
+    deltaHtml = `<p class="muted" style="margin-top:10px">WM-6 actual vs max real NWS: <b>${signo}${delta}°F</b></p>`;
   }
-  if (hw && d.pico_f != null && hw.temp_f !== d.pico_f) {
-    deltaHtml += `<p class="muted">El modelo revisó a la baja: max hoy <b>${hw.temp_f}°F</b> → actual <b>${d.pico_f}°F</b></p>`;
-  }
-  if (pk && pk.fuente) {
-    deltaHtml += `<p class="muted">Referencia Kalshi: <b>${pk.temp_f}°F</b> (${pk.fuente})</p>`;
+  if (hw && d.pico_f != null && Number(hw.temp_f) !== Number(d.pico_f)) {
+    deltaHtml += `<p class="muted">Modelo revisó a la baja: techo WM-6 hoy <b>${hw.temp_f}°F</b> → actual <b>${d.pico_f}°F</b></p>`;
   }
   el.innerHTML = `
     <div class="card">
-      <h3>${d.city}</h3>
+      <h3 style="margin:0 0 4px">${d.city}</h3>
       ${fuenteTxt}
       ${metarHtml}
+      ${heroHtml}
       <div class="grid">
         <div class="stat"><dt>Ahora</dt><dd>${d.ahora_f ?? '—'}°F</dd></div>
         <div class="stat"><dt>Pico WM-6 actual</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
-        ${hwTile}
-        ${maxRealTile}
-        ${kalshiTile}
+        <div class="stat"><dt>Techo WM-6 hoy</dt><dd>${hw && hw.temp_f != null ? hw.temp_f + '°F' : '—'}</dd></div>
+        <div class="stat"><dt>Máx REAL NWS</dt><dd>${mm && mm.temp_f != null ? mm.temp_f + '°F' : '—'}</dd></div>
         <div class="stat"><dt>Mínimo</dt><dd>${d.min_f ?? '—'}°F</dd></div>
         <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
       </div>
