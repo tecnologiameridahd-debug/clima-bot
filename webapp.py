@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.3-max-modelo"
+BUILD_VERSION = "v4.3.4-max-modelo"
 
 
 @app.get("/health")
@@ -150,24 +150,26 @@ def api_resumen(city_id):
     hw = _hw_modelo(city)
 
     try:
-        # Tope duro: si WB se cuelga, devolver NWS+modelo en <40s
+        # Tope duro: si WB se cuelga, devolver NWS+modelo YA (sin esperar al hilo)
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(analizar, city)
-            try:
-                a = fut.result(timeout=35)
-            except FuturesTimeout:
-                a = None
-                wb_err = "WindBorne timeout (35s)"
-            except WindBorneError as e:
-                a = None
-                wb_err = str(e)
-            except Exception as e:
-                a = None
-                wb_err = f"{type(e).__name__}: {e}"
-            else:
-                wb_err = None
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(analizar, city)
+        try:
+            a = fut.result(timeout=28)
+            wb_err = None
+        except FuturesTimeout:
+            a = None
+            wb_err = "WindBorne timeout (28s)"
+        except WindBorneError as e:
+            a = None
+            wb_err = str(e)
+        except Exception as e:
+            a = None
+            wb_err = f"{type(e).__name__}: {e}"
+        finally:
+            # wait=False: no bloquear el request si WB sigue colgado en segundo plano
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if a:
             try:
@@ -484,7 +486,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.3</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.4</p>
 </header>
 <main>
   <div class="controls">
