@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.9-completo"
+BUILD_VERSION = "v4.4-por-dia"
 
 
 @app.get("/health")
@@ -90,34 +90,47 @@ def _resolver_ciudad(city_id):
         raise
 
 
-def _nws_extremos(city):
-    """Max/min real NWS (rápido, no depende de WindBorne)."""
+def _nws_extremos(city, fecha=None):
+    """Max/min real NWS del día LOCAL de la ciudad (no mezcla días)."""
     mm = mn = None
+    meta = {"fecha": None, "n_obs": 0, "sin_obs": False}
     try:
         from observations import metar_extremos_hoy
+        from datetime import datetime as _dt
 
         if city.get("station"):
-            ext = metar_extremos_hoy(city["station"], city["tz"])
+            fecha = fecha or _dt.now(city["tz"]).strftime("%Y-%m-%d")
+            ext = metar_extremos_hoy(city["station"], city["tz"], fecha=fecha)
             if ext:
                 st = ext.get("station") or city["station"]
+                meta = {
+                    "fecha": ext.get("fecha") or fecha,
+                    "n_obs": ext.get("n_obs") or 0,
+                    "sin_obs": bool(ext.get("sin_obs")),
+                    "periodo": ext.get("periodo") or "dia_local",
+                }
                 if ext.get("max"):
-                    mm = {**ext["max"], "station": st}
+                    mm = {**ext["max"], "station": st, "fecha": meta["fecha"]}
                 if ext.get("min"):
-                    mn = {**ext["min"], "station": st}
+                    mn = {**ext["min"], "station": st, "fecha": meta["fecha"]}
     except Exception as e:
         print(f"[webapp] nws: {e}")
-    return mm, mn
+    return mm, mn, meta
 
 
-def _hw_modelo(city, pico_actual=None, hora_actual=None):
+def _hw_modelo(city, pico_actual=None, hora_actual=None, fecha=None):
+    """Techo modelo SOLO del día local pedido (city:YYYY-MM-DD)."""
     try:
         from analysis import pico_wm6_max_hoy
         from datetime import datetime as _dt
 
-        fecha = _dt.now(city["tz"]).strftime("%Y-%m-%d")
-        return pico_wm6_max_hoy(
+        fecha = fecha or _dt.now(city["tz"]).strftime("%Y-%m-%d")
+        hw = pico_wm6_max_hoy(
             city["id"], fecha, pico_actual=pico_actual, hora_actual=hora_actual
         )
+        if hw:
+            hw = {**hw, "fecha": fecha}
+        return hw
     except Exception as e:
         print(f"[webapp] hw: {e}")
         return None
@@ -126,12 +139,22 @@ def _hw_modelo(city, pico_actual=None, hora_actual=None):
 def _pack_extremos(mm, mn):
     return {
         "metar_max_hoy": (
-            {"temp_f": mm["temp_f"], "hora": mm.get("hora"), "station": mm.get("station")}
+            {
+                "temp_f": mm["temp_f"],
+                "hora": mm.get("hora"),
+                "station": mm.get("station"),
+                "fecha": mm.get("fecha"),
+            }
             if mm and mm.get("temp_f") is not None
             else None
         ),
         "metar_min_hoy": (
-            {"temp_f": mn["temp_f"], "hora": mn.get("hora"), "station": mn.get("station")}
+            {
+                "temp_f": mn["temp_f"],
+                "hora": mn.get("hora"),
+                "station": mn.get("station"),
+                "fecha": mn.get("fecha"),
+            }
             if mn and mn.get("temp_f") is not None
             else None
         ),
@@ -170,17 +193,22 @@ def api_resumen(city_id):
         return jsonify({"error": f"Ciudad desconocida: {city_id}"}), 404
 
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
+    from datetime import datetime as _dt
 
-    # Paralelo: NWS (real) + Open-Meteo (modelo/ahora) + highwater local
-    hw = _hw_modelo(city)
+    # Día local de la ciudad (Denver ≠ NYC a la misma hora UTC)
+    fecha_local = _dt.now(city["tz"]).strftime("%Y-%m-%d")
+
+    # Paralelo: NWS (real de ESE día) + Open-Meteo (modelo/ahora del día)
+    hw = _hw_modelo(city, fecha=fecha_local)
     mm = mn = None
+    nws_meta = {"fecha": fecha_local, "n_obs": 0, "sin_obs": True}
     om = {}
     pool = ThreadPoolExecutor(max_workers=2)
     try:
-        f_nws = pool.submit(_nws_extremos, city)
+        f_nws = pool.submit(_nws_extremos, city, fecha_local)
         f_om = pool.submit(_om_rapido, city)
         try:
-            mm, mn = f_nws.result(timeout=10)
+            mm, mn, nws_meta = f_nws.result(timeout=12)
         except FutTimeout:
             print("[webapp] NWS timeout")
         except Exception as e:
@@ -235,7 +263,7 @@ def api_resumen(city_id):
 
                 pico_wm6_max_hoy(
                     city["id"],
-                    _dt.now(city["tz"]).strftime("%Y-%m-%d"),
+                    fecha_local,
                     pico_actual=om_max,
                     hora_actual="OM",
                 )
@@ -293,7 +321,11 @@ def api_resumen(city_id):
         {
             "city": city["nombre"],
             "city_id": city.get("id"),
+            "fecha_local": fecha_local,
+            "tz": str(city.get("tz") or ""),
             "fuente": "nws+modelo",
+            "nws_n_obs": nws_meta.get("n_obs"),
+            "nws_sin_obs": nws_meta.get("sin_obs"),
             "ahora_f": ahora_f,
             "ahora_hora": ahora_hora,
             "pico_f": max_modelo,
@@ -301,7 +333,11 @@ def api_resumen(city_id):
             "min_f": min_modelo,
             "min_hora": None,
             "min_modelo": (
-                {"temp_f": min_modelo, "fuente": min_modelo_fuente}
+                {
+                    "temp_f": min_modelo,
+                    "fuente": min_modelo_fuente,
+                    "fecha": fecha_local,
+                }
                 if min_modelo is not None
                 else None
             ),
@@ -310,6 +346,7 @@ def api_resumen(city_id):
                     "temp_f": max_modelo,
                     "hora": max_modelo_hora,
                     "fuente": max_modelo_fuente,
+                    "fecha": fecha_local,
                 }
                 if max_modelo is not None
                 else None
@@ -319,6 +356,7 @@ def api_resumen(city_id):
                     "temp_f": max_modelo,
                     "hora": max_modelo_hora,
                     "fuente": max_modelo_fuente,
+                    "fecha": fecha_local,
                 }
                 if max_modelo is not None
                 else None
@@ -538,7 +576,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.9</p>
+  <p>Kalshi KXHIGH · max/min por día local · build v4.4</p>
 </header>
 <main>
   <div class="controls">
@@ -594,6 +632,9 @@ async function cargarResumen() {
   const pillsHtml = Object.keys(probs).map(u =>
     `<span class="pill ${pillClass(probs[u])}">≥${u}°F: ${probs[u]}%</span>`
   ).join('');
+  const fechaTxt = d.fecha_local
+    ? `<p class="muted"><b>Día local:</b> ${d.fecha_local}${d.tz ? ' · ' + d.tz : ''}${d.nws_sin_obs ? ' · <i>aún pocas obs NWS de este día</i>' : (d.nws_n_obs != null ? ' · ' + d.nws_n_obs + ' obs NWS' : '')}</p>`
+    : '';
   const fuenteTxt = d.fuente === 'open-meteo'
     ? `<p class="muted">Fallback Open-Meteo (WindBorne: ${d.wb_error || 'no disponible'})</p>`
     : `<p class="muted">${d.init_txt || ''}</p>`;
@@ -679,6 +720,7 @@ async function cargarResumen() {
   el.innerHTML = `
     <div class="card">
       <h3 style="margin:0 0 4px">${d.city}</h3>
+      ${fechaTxt}
       ${fuenteTxt}
       ${metarHtml}
       ${heroHtml}

@@ -82,23 +82,24 @@ def get_metar_obs(station_id, force=False):
     }
 
 
-def metar_extremos_hoy(station_id, tz, force=False):
-    """Máximo y mínimo REALES de hoy (NWS).
+def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
+    """Máximo y mínimo REALES de un día local (NWS).
 
-    Una sola petición a observations: devuelve
-    {"max": {...}, "min": {...}, "station", "n_obs"} o None.
-    El max es la referencia típica de liquidación Kalshi KXHIGH.
+    fecha: 'YYYY-MM-DD' en zona de la ciudad. Default = hoy local.
+    NUNCA mezcla con otro día (si el 29 arranca, no devuelve max del 28).
+    Devuelve {"max", "min", "station", "n_obs", "fecha", "periodo": "dia_local"}.
     """
     if not station_id:
         return None
     station_id = station_id.upper()
-    clave = f"{station_id}:{datetime.now(tz).strftime('%Y-%m-%d')}"
+    hoy_local = fecha or datetime.now(tz).strftime("%Y-%m-%d")
+    clave = f"{station_id}:{hoy_local}"
 
     cached = _max_hoy_cache.get(clave)
     if not force and cached and time.time() - cached["ts"] < MAX_HOY_TTL:
         return cached["data"]
 
-    def _parse_feats(feats, tz_filter_date=None):
+    def _parse_feats(feats, dia):
         mejor = peor = None
         n = 0
         for f in feats:
@@ -109,12 +110,12 @@ def metar_extremos_hoy(station_id, tz, force=False):
                 continue
             try:
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)
-                hora_local = dt.strftime("%H:%M")
             except ValueError:
                 continue
-            if tz_filter_date and dt.strftime("%Y-%m-%d") != tz_filter_date:
+            if dt.strftime("%Y-%m-%d") != dia:
                 continue
             n += 1
+            hora_local = dt.strftime("%H:%M")
             punto = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
             if mejor is None or temp_c > mejor["temp_c"]:
                 mejor = punto
@@ -122,60 +123,82 @@ def metar_extremos_hoy(station_id, tz, force=False):
                 peor = punto
         return mejor, peor, n
 
-    hoy_local = datetime.now(tz).strftime("%Y-%m-%d")
-    feats = []
+    # Pedir desde 00:00 local del día pedido (UTC)
     try:
-        inicio = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        y, m, d = [int(x) for x in hoy_local.split("-")]
+        inicio = datetime(y, m, d, 0, 0, 0, tzinfo=tz)
         start = inicio.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # un poco después del fin del día para no cortar obs cerca de medianoche
+        from datetime import timedelta
+
+        fin = inicio + timedelta(days=1, hours=2)
+        end = fin.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         r = requests.get(
             f"https://api.weather.gov/stations/{station_id}/observations",
-            params={"start": start, "limit": 500},
+            params={"start": start, "end": end, "limit": 500},
             headers=NWS_HEADERS,
-            timeout=8,
+            timeout=10,
         )
         r.raise_for_status()
         feats = r.json().get("features", [])
     except Exception as e:
-        print(f"  [metar_extremos] {station_id}: {e}")
+        print(f"  [metar_extremos] {station_id} {hoy_local}: {e}")
+        # reintento sin end
+        try:
+            r = requests.get(
+                f"https://api.weather.gov/stations/{station_id}/observations",
+                params={"start": start, "limit": 500},
+                headers=NWS_HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            feats = r.json().get("features", [])
+        except Exception as e2:
+            print(f"  [metar_extremos] retry {station_id}: {e2}")
+            return cached["data"] if cached else None
 
-    mejor, peor, n_hoy = _parse_feats(feats, tz_filter_date=hoy_local)
-    etiqueta = "hoy"
+    mejor, peor, n_hoy = _parse_feats(feats, hoy_local)
 
-    # Tras medianoche el día local aún no tiene obs → usar últimas ~30h
-    if mejor is None and peor is None:
+    # Si el día local acaba de empezar (0 obs), reintentar lista reciente
+    # PERO filtrando solo ese día — no mezclar con el día anterior.
+    if n_hoy == 0:
         try:
             r2 = requests.get(
                 f"https://api.weather.gov/stations/{station_id}/observations",
                 params={"limit": 200},
                 headers=NWS_HEADERS,
-                timeout=8,
+                timeout=10,
             )
             r2.raise_for_status()
-            feats2 = r2.json().get("features", [])
-            mejor, peor, n_hoy = _parse_feats(feats2, tz_filter_date=hoy_local)
-            if mejor is None and peor is None:
-                mejor, peor, n_hoy = _parse_feats(feats2, tz_filter_date=None)
-                etiqueta = "ultimas_obs"
-            else:
-                etiqueta = "hoy"
-            feats = feats2
+            mejor, peor, n_hoy = _parse_feats(r2.json().get("features", []), hoy_local)
         except Exception as e:
-            print(f"  [metar_extremos] fallback {station_id}: {e}")
-            return cached["data"] if cached else None
+            print(f"  [metar_extremos] list {station_id}: {e}")
 
     if mejor is None and peor is None:
-        return cached["data"] if cached else None
+        # Día en curso sin observaciones todavía (p. ej. 00:05 local)
+        resultado = {
+            "station": station_id,
+            "n_obs": 0,
+            "fecha": hoy_local,
+            "periodo": "dia_local",
+            "max": None,
+            "min": None,
+            "sin_obs": True,
+        }
+        _max_hoy_cache[clave] = {"ts": time.time(), "data": resultado}
+        return resultado
 
     resultado = {
         "station": station_id,
         "n_obs": n_hoy,
-        "periodo": etiqueta,
+        "fecha": hoy_local,
+        "periodo": "dia_local",
         "max": (
             {
                 "temp_f": mejor["temp_f"],
                 "hora": mejor["hora"],
                 "station": station_id,
-                "periodo": etiqueta,
+                "fecha": hoy_local,
             }
             if mejor
             else None
@@ -185,14 +208,68 @@ def metar_extremos_hoy(station_id, tz, force=False):
                 "temp_f": peor["temp_f"],
                 "hora": peor["hora"],
                 "station": station_id,
-                "periodo": etiqueta,
+                "fecha": hoy_local,
             }
             if peor
             else None
         ),
     }
     _max_hoy_cache[clave] = {"ts": time.time(), "data": resultado}
+    # Archivo diario: no se pierde al cambiar de día
+    try:
+        _persist_extremos_dia(station_id, hoy_local, resultado)
+    except Exception as e:
+        print(f"  [metar_extremos] persist: {e}")
     return resultado
+
+
+def _persist_extremos_dia(station_id, fecha, resultado):
+    """Guarda max/min NWS por estación+fecha (historial por día)."""
+    import json
+    from pathlib import Path
+
+    from config import BASE_DIR
+
+    path = Path(BASE_DIR) / "dias_nws_extremos.json"
+    store = {}
+    if path.exists():
+        try:
+            store = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            store = {}
+    key = f"{station_id}:{fecha}"
+    prev = store.get(key) or {}
+    # high-water del real del día (el max solo puede subir)
+    out = {
+        "station": station_id,
+        "fecha": fecha,
+        "n_obs": resultado.get("n_obs"),
+        "max": resultado.get("max") or prev.get("max"),
+        "min": resultado.get("min") or prev.get("min"),
+    }
+    if prev.get("max") and out.get("max"):
+        if float(prev["max"]["temp_f"]) > float(out["max"]["temp_f"]):
+            out["max"] = prev["max"]
+    if prev.get("min") and out.get("min"):
+        if float(prev["min"]["temp_f"]) < float(out["min"]["temp_f"]):
+            out["min"] = prev["min"]
+    elif prev.get("min") and not out.get("min"):
+        out["min"] = prev["min"]
+    store[key] = out
+    # purgar > 30 días
+    from datetime import datetime, timedelta
+
+    cutoff = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    for k in list(store.keys()):
+        f = k.rsplit(":", 1)[-1]
+        if len(f) == 10 and f < cutoff:
+            del store[k]
+    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def metar_extremos_fecha(station_id, tz, fecha):
+    """Alias explícito: extremos NWS de un día local concreto."""
+    return metar_extremos_hoy(station_id, tz, force=True, fecha=fecha)
 
 
 def metar_max_hoy(station_id, tz, force=False):

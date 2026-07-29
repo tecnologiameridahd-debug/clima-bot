@@ -140,8 +140,26 @@ def _save_hw_disk(store):
             print(f"  [hw] save fail {path.name}: {e}")
 
 
+def _purge_old_day_keys(store, keep_days=21):
+    """Mantiene historial por día (city:YYYY-MM-DD); borra solo entradas muy viejas."""
+    from datetime import datetime, timedelta
+
+    cutoff = (datetime.utcnow() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+    for k in list(store.keys()):
+        if ":" not in k:
+            continue
+        fecha = k.rsplit(":", 1)[-1]
+        if len(fecha) == 10 and fecha < cutoff:
+            del store[k]
+    return store
+
+
 def _actualizar_highwater(city_id, fecha, temp_f, hora=None):
-    """Sube (nunca baja) el techo WM-6 del día y lo persiste en disco."""
+    """Sube (nunca baja) el techo del modelo de ESE día y lo persiste.
+
+    Clave = city_id:YYYY-MM-DD → el día 28 no se mezcla con el 29.
+    Se conservan varios días (historial), no se borra el día anterior.
+    """
     if temp_f is None:
         return None
     try:
@@ -153,17 +171,18 @@ def _actualizar_highwater(city_id, fecha, temp_f, hora=None):
     prev = store.get(key) or {}
     prev_f = prev.get("temp_f")
     if prev_f is None or tf > float(prev_f):
-        store[key] = {"temp_f": round(tf, 1), "hora": hora or prev.get("hora") or "?"}
-        # Limpiar días viejos (dejar solo fecha actual por ciudad)
-        pref = f"{city_id}:"
-        for k in list(store.keys()):
-            if k.startswith(pref) and k != key:
-                del store[k]
+        store[key] = {
+            "temp_f": round(tf, 1),
+            "hora": hora or prev.get("hora") or "?",
+            "fecha": fecha,
+        }
+        _purge_old_day_keys(store)
         _save_hw_disk(store)
         return store[key]
     return {
         "temp_f": round(float(prev_f), 1),
         "hora": prev.get("hora") or hora or "?",
+        "fecha": fecha,
     }
 
 
