@@ -98,6 +98,32 @@ def metar_extremos_hoy(station_id, tz, force=False):
     if not force and cached and time.time() - cached["ts"] < MAX_HOY_TTL:
         return cached["data"]
 
+    def _parse_feats(feats, tz_filter_date=None):
+        mejor = peor = None
+        n = 0
+        for f in feats:
+            props = f.get("properties", {})
+            temp_c = (props.get("temperature") or {}).get("value")
+            ts = props.get("timestamp")
+            if temp_c is None or not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)
+                hora_local = dt.strftime("%H:%M")
+            except ValueError:
+                continue
+            if tz_filter_date and dt.strftime("%Y-%m-%d") != tz_filter_date:
+                continue
+            n += 1
+            punto = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
+            if mejor is None or temp_c > mejor["temp_c"]:
+                mejor = punto
+            if peor is None or temp_c < peor["temp_c"]:
+                peor = punto
+        return mejor, peor, n
+
+    hoy_local = datetime.now(tz).strftime("%Y-%m-%d")
+    feats = []
     try:
         inicio = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
         start = inicio.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -111,40 +137,56 @@ def metar_extremos_hoy(station_id, tz, force=False):
         feats = r.json().get("features", [])
     except Exception as e:
         print(f"  [metar_extremos] {station_id}: {e}")
-        return cached["data"] if cached else None
 
-    mejor = None
-    peor = None
-    for f in feats:
-        props = f.get("properties", {})
-        temp_c = (props.get("temperature") or {}).get("value")
-        ts = props.get("timestamp")
-        if temp_c is None or not ts:
-            continue
+    mejor, peor, n_hoy = _parse_feats(feats, tz_filter_date=hoy_local)
+    etiqueta = "hoy"
+
+    # Tras medianoche el día local aún no tiene obs → usar últimas ~30h
+    if mejor is None and peor is None:
         try:
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)
-            hora_local = dt.strftime("%H:%M")
-        except ValueError:
-            hora_local = ""
-        punto = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
-        if mejor is None or temp_c > mejor["temp_c"]:
-            mejor = punto
-        if peor is None or temp_c < peor["temp_c"]:
-            peor = punto
+            r2 = requests.get(
+                f"https://api.weather.gov/stations/{station_id}/observations",
+                params={"limit": 200},
+                headers=NWS_HEADERS,
+                timeout=8,
+            )
+            r2.raise_for_status()
+            feats2 = r2.json().get("features", [])
+            mejor, peor, n_hoy = _parse_feats(feats2, tz_filter_date=hoy_local)
+            if mejor is None and peor is None:
+                mejor, peor, n_hoy = _parse_feats(feats2, tz_filter_date=None)
+                etiqueta = "ultimas_obs"
+            else:
+                etiqueta = "hoy"
+            feats = feats2
+        except Exception as e:
+            print(f"  [metar_extremos] fallback {station_id}: {e}")
+            return cached["data"] if cached else None
 
     if mejor is None and peor is None:
         return cached["data"] if cached else None
 
     resultado = {
         "station": station_id,
-        "n_obs": len(feats),
+        "n_obs": n_hoy,
+        "periodo": etiqueta,
         "max": (
-            {"temp_f": mejor["temp_f"], "hora": mejor["hora"], "station": station_id}
+            {
+                "temp_f": mejor["temp_f"],
+                "hora": mejor["hora"],
+                "station": station_id,
+                "periodo": etiqueta,
+            }
             if mejor
             else None
         ),
         "min": (
-            {"temp_f": peor["temp_f"], "hora": peor["hora"], "station": station_id}
+            {
+                "temp_f": peor["temp_f"],
+                "hora": peor["hora"],
+                "station": station_id,
+                "periodo": etiqueta,
+            }
             if peor
             else None
         ),
