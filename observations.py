@@ -82,12 +82,19 @@ def get_metar_obs(station_id, force=False):
     }
 
 
+# Antes de esta hora local, un único obs nocturno NO es el high del día (Kalshi).
+_MAX_DAYLIGHT_START = 6   # 00:00–05:59 no cuentan para el MÁX
+_MAX_CONFIABLE_HOUR = 10  # antes de las 10, el max es provisional
+
+
 def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
     """Máximo y mínimo REALES de un día local (NWS).
 
     fecha: 'YYYY-MM-DD' en zona de la ciudad. Default = hoy local.
     NUNCA mezcla con otro día (si el 29 arranca, no devuelve max del 28).
-    Devuelve {"max", "min", "station", "n_obs", "fecha", "periodo": "dia_local"}.
+
+    El MÁX ignora lecturas 00:00–05:59 (madrugada): si no, a la 1am sale
+    "máx del día = 70°F" = temp actual, no el high diurno.
     """
     if not station_id:
         return None
@@ -100,8 +107,10 @@ def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
         return cached["data"]
 
     def _parse_feats(feats, dia):
-        mejor = peor = None
+        mejor = peor = None  # max diurno / min cualquier hora
+        mejor_raw = None     # max incluyendo madrugada (solo diagnóstico)
         n = 0
+        n_daylight = 0
         for f in feats:
             props = f.get("properties", {})
             temp_c = (props.get("temperature") or {}).get("value")
@@ -116,12 +125,22 @@ def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
                 continue
             n += 1
             hora_local = dt.strftime("%H:%M")
-            punto = {"temp_c": temp_c, "temp_f": _c_to_f(temp_c), "hora": hora_local}
-            if mejor is None or temp_c > mejor["temp_c"]:
-                mejor = punto
+            punto = {
+                "temp_c": temp_c,
+                "temp_f": _c_to_f(temp_c),
+                "hora": hora_local,
+                "hour": dt.hour,
+            }
             if peor is None or temp_c < peor["temp_c"]:
                 peor = punto
-        return mejor, peor, n
+            if mejor_raw is None or temp_c > mejor_raw["temp_c"]:
+                mejor_raw = punto
+            # High del día: solo diurnas (evita 70°F a la 1am como "máx")
+            if dt.hour >= _MAX_DAYLIGHT_START:
+                n_daylight += 1
+                if mejor is None or temp_c > mejor["temp_c"]:
+                    mejor = punto
+        return mejor, peor, n, n_daylight, mejor_raw
 
     # Pedir desde 00:00 local del día pedido (UTC)
     try:
@@ -157,7 +176,7 @@ def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
             print(f"  [metar_extremos] retry {station_id}: {e2}")
             return cached["data"] if cached else None
 
-    mejor, peor, n_hoy = _parse_feats(feats, hoy_local)
+    mejor, peor, n_hoy, n_daylight, mejor_raw = _parse_feats(feats, hoy_local)
 
     # Si el día local acaba de empezar (0 obs), reintentar lista reciente
     # PERO filtrando solo ese día — no mezclar con el día anterior.
@@ -170,9 +189,18 @@ def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
                 timeout=10,
             )
             r2.raise_for_status()
-            mejor, peor, n_hoy = _parse_feats(r2.json().get("features", []), hoy_local)
+            mejor, peor, n_hoy, n_daylight, mejor_raw = _parse_feats(
+                r2.json().get("features", []), hoy_local
+            )
         except Exception as e:
             print(f"  [metar_extremos] list {station_id}: {e}")
+
+    ahora_local = datetime.now(tz)
+    hora_ahora = ahora_local.hour
+    # Sin lecturas diurnas aún (solo madrugada): NO hay "máx del día"
+    max_provisional = mejor is None or (
+        hora_ahora < _MAX_CONFIABLE_HOUR and n_daylight < 3
+    )
 
     if mejor is None and peor is None:
         # Día en curso sin observaciones todavía (p. ej. 00:05 local)
@@ -184,23 +212,52 @@ def metar_extremos_hoy(station_id, tz, force=False, fecha=None):
             "max": None,
             "min": None,
             "sin_obs": True,
+            "max_provisional": True,
+            "obs_actual": (
+                {
+                    "temp_f": mejor_raw["temp_f"],
+                    "hora": mejor_raw["hora"],
+                }
+                if mejor_raw
+                else None
+            ),
         }
         _max_hoy_cache[clave] = {"ts": time.time(), "data": resultado}
         return resultado
 
+    # Si solo hay madrugada: no devolver max=70 como high del día
+    max_out = None
+    if mejor is not None and not (
+        hora_ahora < _MAX_CONFIABLE_HOUR and n_daylight == 0
+    ):
+        max_out = {
+            "temp_f": mejor["temp_f"],
+            "hora": mejor["hora"],
+            "station": station_id,
+            "fecha": hoy_local,
+            "provisional": bool(max_provisional),
+        }
+    elif mejor_raw is not None and hora_ahora < _MAX_CONFIABLE_HOUR:
+        print(
+            f"  [metar_extremos] {station_id}: max madrugada "
+            f"{mejor_raw['temp_f']}F @{mejor_raw['hora']} — NO es high del día"
+        )
+
     resultado = {
         "station": station_id,
         "n_obs": n_hoy,
+        "n_daylight": n_daylight,
         "fecha": hoy_local,
         "periodo": "dia_local",
-        "max": (
+        "sin_obs": n_hoy == 0,
+        "max": max_out,
+        "max_provisional": bool(max_provisional or max_out is None),
+        "obs_actual": (
             {
-                "temp_f": mejor["temp_f"],
-                "hora": mejor["hora"],
-                "station": station_id,
-                "fecha": hoy_local,
+                "temp_f": mejor_raw["temp_f"],
+                "hora": mejor_raw["hora"],
             }
-            if mejor
+            if mejor_raw
             else None
         ),
         "min": (

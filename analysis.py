@@ -231,10 +231,24 @@ def pico_wm6_max_hoy(city_id, fecha, pico_actual=None, hora_actual=None):
 
 
 def _adjuntar_pico_dia(a):
-    """Añade campos de pico del día (high-water + máx real) al análisis."""
+    """Añade campos de pico del día (high-water + máx real) al análisis.
+
+    Importante de madrugada: la corrida WM-6 a veces solo trae horas restantes
+    (ej. 70°F a la 1am). Eso NO es el high del día — se corrige con high-water
+    y, si hace falta, con referencia NWS/METAR.
+    """
     if not a:
         return a
     city = a["city"]
+    pico_run = float(a["pico"]["temp_f"])
+    ahora_t = float(a["ahora"]["temp_f"])
+    try:
+        h = int(str(a["pico"].get("hora") or a["ahora"].get("hora") or "12").split(":")[0])
+    except (TypeError, ValueError):
+        h = 12
+    # Pico de la corrida ≈ temp actual de madrugada → basura como "máx del día"
+    sospechoso = h < 10 or (abs(pico_run - ahora_t) < 2.0 and h < 12)
+
     hw = pico_wm6_max_hoy(
         city["id"],
         a["fecha"],
@@ -245,27 +259,47 @@ def _adjuntar_pico_dia(a):
         "temp_f": a["pico"]["temp_f"],
         "hora": a["pico"].get("hora"),
     }
+    # Si high-water no existe y el pico es nocturno, no inventar 70 como high del día:
+    # usar METAR max del día si hay, si no dejar marcado sospechoso
+    mm = a.get("metar_max_hoy")
+    if sospechoso and hw and hw.get("temp_f") is not None:
+        if float(hw["temp_f"]) <= pico_run + 1 and mm and mm.get("temp_f") is not None:
+            # highwater no ayudó (bot apagado todo el día) — no usar 70 como max
+            pass
+        elif float(hw["temp_f"]) > pico_run + 1:
+            # Sustituir max_dia / mensaje principal por high-water
+            a["max_dia"] = float(hw["temp_f"])
+            a["pico_truncado"] = True
+            a["pico_api_corrida"] = pico_run
+
     a["pico_wm6_max_hoy"] = hw
     # Referencia Kalshi: el techo real (NWS) manda; si aún no hay obs, el max modelo del día
-    mm = a.get("metar_max_hoy")
     if mm and mm.get("temp_f") is not None:
         a["pico_kalshi"] = {
             "temp_f": mm["temp_f"],
             "hora": mm.get("hora"),
             "fuente": f"NWS {mm.get('station') or city.get('station') or ''}".strip(),
         }
-    elif hw:
+    elif hw and hw.get("temp_f") is not None and (
+        not sospechoso or float(hw["temp_f"]) > pico_run + 1
+    ):
         a["pico_kalshi"] = {
             "temp_f": hw["temp_f"],
             "hora": hw.get("hora"),
             "fuente": "WM-6 max hoy (sin máx real aún)",
         }
     else:
+        # No promocionar temp nocturna como high del día
         a["pico_kalshi"] = {
-            "temp_f": a["pico"]["temp_f"],
+            "temp_f": a["pico"]["temp_f"] if not sospechoso else None,
             "hora": a["pico"].get("hora"),
-            "fuente": "WM-6 actual",
+            "fuente": "WM-6 actual (solo horas restantes — no es high del día)"
+            if sospechoso
+            else "WM-6 actual",
         }
+        if sospechoso:
+            a["pico_sospechoso_nocturno"] = True
+            a["max_dia_api"] = pico_run
     return a
 
 
@@ -519,9 +553,14 @@ def msg_resumen(a):
         lineas.append(f"Δ Real−WB ahora: <b>{sign}{delta}°F</b>")
     lineas += [
         "",
-        f"Pronóstico ahora: <b>{a['ahora']['temp_f']}°F</b> ({a['ahora']['hora']})",
-        f"Pico WM-6 actual: <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})",
+        f"Pronóstico ahora: <b>{a['ahora']['temp_f']}°F</b> ({a['ahora']['hora']})  ← no es el máx del día",
+        f"Pico WM-6 corrida actual: <b>{a['pico']['temp_f']}°F</b> ({texto_hora(a['pico'])})",
     ]
+    if a.get("pico_sospechoso_nocturno"):
+        lineas.append(
+            "<i>⚠ De madrugada la API solo trae horas restantes "
+            f"(~{a['pico']['temp_f']}°F). Eso NO es el high del día.</i>"
+        )
     hw = a.get("pico_wm6_max_hoy")
     if hw and hw.get("temp_f") is not None and hw["temp_f"] != a["pico"]["temp_f"]:
         lineas.append(

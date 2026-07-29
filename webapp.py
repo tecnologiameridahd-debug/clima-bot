@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.4-por-dia"
+BUILD_VERSION = "v4.5-max-no-madrugada"
 
 
 @app.get("/health")
@@ -93,7 +93,13 @@ def _resolver_ciudad(city_id):
 def _nws_extremos(city, fecha=None):
     """Max/min real NWS del día LOCAL de la ciudad (no mezcla días)."""
     mm = mn = None
-    meta = {"fecha": None, "n_obs": 0, "sin_obs": False}
+    meta = {
+        "fecha": None,
+        "n_obs": 0,
+        "sin_obs": False,
+        "max_provisional": True,
+        "obs_actual": None,
+    }
     try:
         from observations import metar_extremos_hoy
         from datetime import datetime as _dt
@@ -107,6 +113,8 @@ def _nws_extremos(city, fecha=None):
                     "fecha": ext.get("fecha") or fecha,
                     "n_obs": ext.get("n_obs") or 0,
                     "sin_obs": bool(ext.get("sin_obs")),
+                    "max_provisional": bool(ext.get("max_provisional")),
+                    "obs_actual": ext.get("obs_actual"),
                     "periodo": ext.get("periodo") or "dia_local",
                 }
                 if ext.get("max"):
@@ -209,6 +217,10 @@ def api_resumen(city_id):
         f_om = pool.submit(_om_rapido, city)
         try:
             mm, mn, nws_meta = f_nws.result(timeout=12)
+            # propagar flags de madrugada desde metar_extremos
+            if isinstance(nws_meta, dict) and mm is None:
+                # _nws_extremos may not pass provisional — re-read from full ext below
+                pass
         except FutTimeout:
             print("[webapp] NWS timeout")
         except Exception as e:
@@ -223,8 +235,22 @@ def api_resumen(city_id):
         pool.shutdown(wait=False)
 
     # --- REAL (NWS) ---
-    max_real = mm["temp_f"] if mm and mm.get("temp_f") is not None else None
+    # max de madrugada (00–06) no cuenta: era el bug "70°F = temp ahora como máx del día"
+    max_provisional = bool(
+        (nws_meta or {}).get("max_provisional")
+        or (mm and mm.get("provisional"))
+        or (nws_meta or {}).get("sin_obs")
+    )
+    max_real = None
+    if mm and mm.get("temp_f") is not None and not max_provisional:
+        max_real = mm["temp_f"]
     min_real = mn["temp_f"] if mn and mn.get("temp_f") is not None else None
+    # Temp actual de estación (puede ser 70 a la 1am) — NO es el high
+    obs_actual = None
+    if nws_meta and nws_meta.get("obs_actual"):
+        obs_actual = nws_meta["obs_actual"]
+    elif mm and max_provisional and mm.get("temp_f") is not None:
+        obs_actual = {"temp_f": mm["temp_f"], "hora": mm.get("hora")}
 
     # --- MODELO: techo WM-6 si existe; si no (o es menor), rellenar con Open-Meteo ---
     om_max = om.get("pico_hoy")
@@ -285,6 +311,13 @@ def api_resumen(city_id):
             "hora": (mm or {}).get("hora"),
             "fuente": f"NWS {(mm or {}).get('station') or city.get('station') or ''}".strip(),
         }
+    elif max_modelo is not None:
+        # Sin máx real confiable aún (madrugada): no usar 70 como Kalshi
+        pico_kalshi = {
+            "temp_f": max_modelo,
+            "hora": max_modelo_hora,
+            "fuente": f"{max_modelo_fuente or 'modelo'} (sin máx real diurno aún)",
+        }
 
     # Discrepancias
     disc = {"filas": []}
@@ -317,6 +350,14 @@ def api_resumen(city_id):
         "Los valores no se reescriben entre sí; solo se comparan."
     )
 
+    # metar_max solo si es high confiable (no madrugada)
+    pack = _pack_extremos(mm if not max_provisional else None, mn)
+    if max_provisional:
+        pack["metar_max_hoy"] = None
+        pack["metar_max_nota"] = (
+            "Sin máx real diurno aún (madrugada: la temp actual no es el high del día)"
+        )
+
     return jsonify(
         {
             "city": city["nombre"],
@@ -324,10 +365,13 @@ def api_resumen(city_id):
             "fecha_local": fecha_local,
             "tz": str(city.get("tz") or ""),
             "fuente": "nws+modelo",
+            "build": BUILD_VERSION,
             "nws_n_obs": nws_meta.get("n_obs"),
             "nws_sin_obs": nws_meta.get("sin_obs"),
+            "max_provisional": max_provisional,
             "ahora_f": ahora_f,
             "ahora_hora": ahora_hora,
+            "obs_actual_nws": obs_actual,
             "pico_f": max_modelo,
             "pico_hora": max_modelo_hora,
             "min_f": min_modelo,
@@ -363,7 +407,7 @@ def api_resumen(city_id):
             ),
             "pico_kalshi": pico_kalshi,
             "discrepancia": disc,
-            **_pack_extremos(mm, mn),
+            **pack,
         }
     )
 
