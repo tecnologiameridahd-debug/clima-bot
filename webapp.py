@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.6-fast"
+BUILD_VERSION = "v4.3.7-fast"
 
 
 @app.get("/health")
@@ -140,103 +140,37 @@ def _pack_extremos(mm, mn):
 
 @app.get("/api/resumen/<city_id>")
 def api_resumen(city_id):
-    """Resumen rápido para el dashboard.
-
-    Prioridad: NWS max/min del día + techo WM-6 registrado (seed/logs).
-    WindBorne en vivo solo si hay caché batch fresca (no bloquea).
-    Open-Meteo rellena "ahora" / min-max modelo si hace falta.
-    """
+    """Resumen rápido: max/min REAL (NWS) + max MODELO registrado. Sin bloquear en WB."""
     try:
         city = _resolver_ciudad(city_id)
     except ValueError:
         return jsonify({"error": f"Ciudad desconocida: {city_id}"}), 404
 
-    mm, mn = _nws_extremos(city)
+    # 1) Techo modelo (archivo local, instantáneo)
     hw = _hw_modelo(city)
-    a = None
-    wb_err = None
 
-    # Solo usar WB si el batch ya está en caché (sin red / sin colgar)
+    # 2) Max/min real NWS con tope de hilo (si weather.gov cuelga, no tumba la página)
+    mm = mn = None
     try:
-        from api import batch_cache_fresh, city_raw_from_batch
-        from analysis import analizar_desde_raw, _adjuntar_pico_dia
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 
-        if batch_cache_fresh() and city.get("id") in __import__(
-            "cities", fromlist=["KALSHI_CITIES"]
-        ).KALSHI_CITIES:
-            raw = city_raw_from_batch(city["id"])
-            a = analizar_desde_raw(raw, city)
-            if a:
-                a["metar_max_hoy"] = mm
-                a["metar_min_hoy"] = mn
-                a = _adjuntar_pico_dia(a)
-                try:
-                    log_peak(a)
-                except Exception as e:
-                    print(f"[webapp] log_peak: {e}")
-    except Exception as e:
-        wb_err = str(e)
-        print(f"[webapp] cache WB: {e}")
-
-    if a:
-        mm = a.get("metar_max_hoy") or mm
-        mn = a.get("metar_min_hoy") or mn
-        hw = a.get("pico_wm6_max_hoy") or hw
-        metar = a.get("metar")
-        pk = a.get("pico_kalshi")
-        return jsonify(
-            {
-                "city": city["nombre"],
-                "fuente": "windborne-cache",
-                "fecha": a["fecha"],
-                "init_txt": a["init_txt"],
-                "ahora_f": a["ahora"]["temp_f"],
-                "ahora_hora": a["ahora"]["hora"],
-                "pico_f": a["pico"]["temp_f"],
-                "pico_hora": a["pico"]["hora"],
-                "pico_wm6_max_hoy": (
-                    {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
-                    if hw and hw.get("temp_f") is not None
-                    else None
-                ),
-                "pico_kalshi": (
-                    {
-                        "temp_f": pk["temp_f"],
-                        "hora": pk.get("hora"),
-                        "fuente": pk.get("fuente"),
-                    }
-                    if pk and pk.get("temp_f") is not None
-                    else None
-                ),
-                "min_f": a["min_dia"],
-                "min_hora": (a.get("minimo") or {}).get("hora"),
-                "promedio": a["promedio"],
-                "probs_pico": {
-                    str(k): v for k, v in (a.get("probs_pico") or {}).items()
-                },
-                "metar": (
-                    {
-                        "temp_f": metar["temp_f"],
-                        "age_min": metar["age_min"],
-                        "station": metar["station"],
-                    }
-                    if metar and metar.get("temp_f") is not None
-                    else None
-                ),
-                **_pack_extremos(mm, mn),
-            }
-        )
-
-    # Open-Meteo solo si faltan extremos (evita colgar cuando NWS ya basta)
-    om = {}
-    if not (mm and mm.get("temp_f") is not None):
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            om = resumen_om(city=city) or {}
-        except Exception as e2:
-            print(f"[webapp] om: {e2}")
-            if not wb_err:
-                wb_err = str(e2)
-    hw = _hw_modelo(city, pico_actual=om.get("pico_hoy")) or hw
+            fut = pool.submit(_nws_extremos, city)
+            mm, mn = fut.result(timeout=10)
+        except FutTimeout:
+            print("[webapp] NWS timeout 10s")
+        except Exception as e:
+            print(f"[webapp] NWS: {e}")
+        finally:
+            pool.shutdown(wait=False)
+    except Exception as e:
+        print(f"[webapp] NWS pool: {e}")
+        try:
+            mm, mn = _nws_extremos(city)
+        except Exception:
+            pass
+
     pico_kalshi = None
     if mm and mm.get("temp_f") is not None:
         pico_kalshi = {
@@ -244,23 +178,15 @@ def api_resumen(city_id):
             "hora": mm.get("hora"),
             "fuente": f"NWS {mm.get('station') or ''}".strip(),
         }
-    elif om.get("pico_hoy") is not None:
-        pico_kalshi = {
-            "temp_f": om.get("pico_hoy"),
-            "hora": None,
-            "fuente": "Open-Meteo",
-        }
-    fuente = "nws+modelo"
-    if om:
-        fuente = "open-meteo"
+
     return jsonify(
         {
             "city": city["nombre"],
-            "fuente": fuente,
-            "wb_error": wb_err,
-            "ahora_f": om.get("ahora_f"),
-            "pico_f": om.get("pico_hoy"),
-            "min_f": om.get("min_hoy") if om else (mn.get("temp_f") if mn else None),
+            "fuente": "nws+modelo",
+            "ahora_f": None,
+            "pico_f": hw["temp_f"] if hw else None,
+            "pico_hora": hw.get("hora") if hw else None,
+            "min_f": mn["temp_f"] if mn and mn.get("temp_f") is not None else None,
             "min_hora": mn.get("hora") if mn else None,
             "pico_wm6_max_hoy": (
                 {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
@@ -470,7 +396,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.6</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.7</p>
 </header>
 <main>
   <div class="controls">
