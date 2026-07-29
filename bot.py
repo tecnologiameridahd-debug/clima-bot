@@ -56,10 +56,22 @@ from extras import (
 )
 from fallback_om import msg_fallback_resumen, msg_manana
 from gemini import lanzar_gemini_async
-from telegram_io import enviar, enviar_foto
+from telegram_io import enviar, enviar_foto, set_token
 
 _monitor_activo = {}
 _ciudad_activa = {}
+# chat_id de Telegram es el mismo para un usuario en todos los bots que le hable
+# (chat privado = user_id). Sin esto, "/ciudad" o "/monitor" en un bot pisaría
+# el estado de otro bot corriendo con otro token en el mismo proceso.
+_ctx = threading.local()
+
+
+def _bot_id():
+    return getattr(_ctx, "bot_id", "default")
+
+
+def _ck(chat_id):
+    return f"{_bot_id()}:{chat_id}"
 
 COMANDOS_BASE = {
     "resumen",
@@ -136,7 +148,7 @@ def _help(ciudad_id=None):
 
 
 def _ciudad_chat(chat_id):
-    return _ciudad_activa.get(chat_id, DEFAULT_CITY_ID)
+    return _ciudad_activa.get(_ck(chat_id), DEFAULT_CITY_ID)
 
 
 def _parse(texto):
@@ -271,7 +283,7 @@ def handle(texto, chat_id):
                 parse_mode=None,
             )
             return
-        _ciudad_activa[chat_id] = lugar["id"]
+        _ciudad_activa[_ck(chat_id)] = lugar["id"]
         c = get_city(lugar["id"])
         enviar(
             chat_id,
@@ -281,10 +293,10 @@ def handle(texto, chat_id):
 
     if cmd.startswith("monitor") or cmd == "monitor":
         if args and args[0] == "off":
-            _monitor_activo.pop(chat_id, None)
+            _monitor_activo.pop(_ck(chat_id), None)
             enviar(chat_id, "🔕 Monitor apagado.", parse_mode=None)
         else:
-            _monitor_activo[chat_id] = _ciudad_chat(chat_id)
+            _monitor_activo[_ck(chat_id)] = _ciudad_chat(chat_id)
             c = get_city(_ciudad_chat(chat_id))
             enviar(
                 chat_id,
@@ -458,7 +470,15 @@ def handle(texto, chat_id):
 
 
 def _chequear_alertas():
-    for chat_id, city_id in list(_monitor_activo.items()):
+    prefix = f"{_bot_id()}:"
+    for key, city_id in list(_monitor_activo.items()):
+        if not key.startswith(prefix):
+            continue
+        chat_id = key[len(prefix):]
+        try:
+            chat_id = int(chat_id)
+        except ValueError:
+            pass
         try:
             city = get_city(city_id)
             a = analizar(city)
@@ -481,14 +501,25 @@ def _chequear_alertas():
             print(f"Error monitor {chat_id}: {e}")
 
 
-def main():
+def main(token=None, iniciar_prefetch=True):
+    """Corre el polling de un bot. Si se dan varios tokens (multi-bot), cada
+    uno corre en su propio hilo llamando a main(token=...) — ver
+    _maybe_start_bot() en webapp.py o el bloque __main__ más abajo.
+    """
     from api import api_status
     from config import WIND_KEY
 
-    print(f"🎈 WindBorne Monitor v4 — {len(KALSHI_CITIES)} ciudades Kalshi KXHIGH")
-    print(f"Key: …{(WIND_KEY or '')[-8:]} | prefetch={PREFETCH_ENABLED} cada {PREFETCH_INTERVAL}s")
+    tok = token or TELEGRAM_TOKEN
+    _ctx.bot_id = tok.split(":")[0] if tok else "default"
+    set_token(tok)
+
+    print(
+        f"🎈 WindBorne Monitor v4 — bot {_ctx.bot_id} — "
+        f"{len(KALSHI_CITIES)} ciudades Kalshi KXHIGH"
+    )
+    print(f"Key: …{(WIND_KEY or '')[-8:]} | prefetch={PREFETCH_ENABLED and iniciar_prefetch} cada {PREFETCH_INTERVAL}s")
     print(f"Open-Meteo fallback: {OPEN_METEO_ENABLED}")
-    if PREFETCH_ENABLED:
+    if PREFETCH_ENABLED and iniciar_prefetch:
         threading.Thread(target=_prefetch_loop, daemon=True).start()
     offset = 0
     ultimo_monitor = 0
@@ -502,7 +533,7 @@ def main():
                 ultimo_monitor = time.time()
 
             r = requests.get(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                f"https://api.telegram.org/bot{tok}/getUpdates",
                 params={"offset": offset, "timeout": 25},
                 timeout=35,
             )
@@ -511,9 +542,25 @@ def main():
                 if "message" in upd and "text" in upd["message"]:
                     handle(upd["message"]["text"], upd["message"]["chat"]["id"])
         except Exception as e:
-            print(f"Loop error: {e}")
+            print(f"Loop error (bot {_ctx.bot_id}): {e}")
             time.sleep(5)
 
 
 if __name__ == "__main__":
-    main()
+    from config import TELEGRAM_TOKENS
+
+    if len(TELEGRAM_TOKENS) <= 1:
+        main()
+    else:
+        hilos = [
+            threading.Thread(
+                target=main,
+                kwargs={"token": tok, "iniciar_prefetch": (i == 0)},
+                name=f"bot-{i + 1}",
+            )
+            for i, tok in enumerate(TELEGRAM_TOKENS)
+        ]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join()

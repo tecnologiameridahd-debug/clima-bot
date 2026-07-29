@@ -15,7 +15,6 @@ from analysis import analizar, analizar_todas, edge_kalshi, log_peak
 from api import WindBorneError
 from charts import grafico_completo, grafico_historial
 from cities import KALSHI_CITIES, get_city, resolve_location
-from config import TELEGRAM_TOKEN
 from cyclones import BASINS, BASINS_USA, ciclones_activos
 from fallback_om import resumen_om
 
@@ -38,14 +37,22 @@ def _maybe_start_bot():
         return
     if os.environ.get("RUN_TELEGRAM_BOT", "0") not in ("1", "true", "True"):
         return
-    if not TELEGRAM_TOKEN:
+    from config import TELEGRAM_TOKENS
+
+    if not TELEGRAM_TOKENS:
         print("[webapp] RUN_TELEGRAM_BOT activo pero falta WB_TELEGRAM_TOKEN; bot no iniciado.")
         return
     import bot as bot_module
 
-    threading.Thread(target=bot_module.main, daemon=True, name="telegram-bot").start()
+    for i, tok in enumerate(TELEGRAM_TOKENS):
+        threading.Thread(
+            target=bot_module.main,
+            kwargs={"token": tok, "iniciar_prefetch": (i == 0)},
+            daemon=True,
+            name=f"telegram-bot-{i + 1}",
+        ).start()
     _bot_thread_started = True
-    print("[webapp] Bot de Telegram iniciado en background thread.")
+    print(f"[webapp] {len(TELEGRAM_TOKENS)} bot(s) de Telegram iniciados en background.")
 
 
 _maybe_start_bot()

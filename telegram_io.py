@@ -1,10 +1,24 @@
+import threading
+
 import requests
 
 from config import TELEGRAM_TOKEN
 
+# Token activo del hilo actual (cada bot corre su polling en su propio hilo).
+# Sin set_token(), cae al TELEGRAM_TOKEN por defecto (uso single-bot / scripts sueltos).
+_ctx = threading.local()
+
+
+def set_token(token):
+    _ctx.token = token
+
+
+def _token():
+    return getattr(_ctx, "token", None) or TELEGRAM_TOKEN
+
 
 def enviar(chat_id, texto, parse_mode="HTML"):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{_token()}/sendMessage"
     payload = {"chat_id": chat_id, "text": texto}
     if parse_mode:
         payload["parse_mode"] = parse_mode
@@ -19,7 +33,7 @@ def enviar_largo(chat_id, texto, parse_mode=None):
 
 
 def enviar_foto(chat_id, img_bytes, caption=""):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    url = f"https://api.telegram.org/bot{_token()}/sendPhoto"
     requests.post(
         url,
         data={"chat_id": chat_id, "caption": caption[:1024]},

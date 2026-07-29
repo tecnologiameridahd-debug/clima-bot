@@ -45,6 +45,32 @@ TELEGRAM_TOKEN = (
     or (_LOCAL_TG or "").strip()
 )
 
+# --- Multi-bot: varios tokens de Telegram corriendo el mismo bot en paralelo ---
+# Cada uno en WB_TELEGRAM_TOKEN_2, _3, ... o todos juntos en WB_TELEGRAM_TOKENS
+# (separados por coma). En Render, lo más simple es un solo env var WB_TELEGRAM_TOKENS.
+_LOCAL_EXTRA = []
+try:
+    from config_local import WB_TELEGRAM_TOKENS_EXTRA as _LOCAL_EXTRA  # type: ignore
+except ImportError:
+    pass
+
+
+def _tokens_extra_env():
+    out = []
+    multi = os.environ.get("WB_TELEGRAM_TOKENS", "")
+    out.extend(t.strip() for t in multi.split(",") if t.strip())
+    for i in range(2, 11):
+        t = os.environ.get(f"WB_TELEGRAM_TOKEN_{i}")
+        if t:
+            out.append(t.strip())
+    return out
+
+
+TELEGRAM_TOKENS = []
+for _t in [TELEGRAM_TOKEN, *_tokens_extra_env(), *_LOCAL_EXTRA]:
+    if _t and _t not in TELEGRAM_TOKENS:
+        TELEGRAM_TOKENS.append(_t)
+
 # Modelo principal (único con distribución IA para temperature_2m)
 MODELO_PRINCIPAL = "wm-6"
 

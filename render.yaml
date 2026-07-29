@@ -11,6 +11,8 @@ services:
         sync: false
       - key: WB_TELEGRAM_TOKEN
         sync: false
+      - key: WB_TELEGRAM_TOKENS
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: RUN_TELEGRAM_BOT
