@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.7-fast"
+BUILD_VERSION = "v4.3.8-discrepancia"
 
 
 @app.get("/health")
@@ -179,14 +179,34 @@ def api_resumen(city_id):
             "fuente": f"NWS {mm.get('station') or ''}".strip(),
         }
 
+    # Discrepancia entre fuentes (no altera los valores; solo compara)
+    max_real = mm["temp_f"] if mm and mm.get("temp_f") is not None else None
+    max_modelo = hw["temp_f"] if hw and hw.get("temp_f") is not None else None
+    min_real = mn["temp_f"] if mn and mn.get("temp_f") is not None else None
+    disc = {}
+    if max_real is not None and max_modelo is not None:
+        dmax = round(float(max_modelo) - float(max_real), 1)
+        disc["max_modelo_menos_real"] = dmax
+        if dmax > 0.3:
+            disc["max_lectura"] = f"Modelo {dmax:+.1f}°F más alto que el real (modelo caliente)"
+        elif dmax < -0.3:
+            disc["max_lectura"] = f"Modelo {dmax:+.1f}°F más bajo que el real (modelo frío)"
+        else:
+            disc["max_lectura"] = f"Modelo y real casi iguales ({dmax:+.1f}°F)"
+    disc["nota"] = (
+        "REAL = estación NWS (Kalshi). MODELO = techo WM-6 registrado del día. "
+        "No se reescriben: solo se muestra la diferencia."
+    )
+
     return jsonify(
         {
             "city": city["nombre"],
+            "city_id": city.get("id"),
             "fuente": "nws+modelo",
             "ahora_f": None,
-            "pico_f": hw["temp_f"] if hw else None,
+            "pico_f": max_modelo,
             "pico_hora": hw.get("hora") if hw else None,
-            "min_f": mn["temp_f"] if mn and mn.get("temp_f") is not None else None,
+            "min_f": min_real,
             "min_hora": mn.get("hora") if mn else None,
             "pico_wm6_max_hoy": (
                 {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
@@ -194,6 +214,7 @@ def api_resumen(city_id):
                 else None
             ),
             "pico_kalshi": pico_kalshi,
+            "discrepancia": disc,
             **_pack_extremos(mm, mn),
         }
     )
@@ -366,6 +387,17 @@ DASHBOARD_HTML = """<!doctype html>
   .hero-pico.min .value { color: var(--ok); }
   .hero-pico.model .value { color: var(--warn); }
   .hero-pico .sub { margin: 0; font-size: 13px; color: var(--ink-soft); }
+  .disc-box {
+    margin-top: 14px; padding: 14px 16px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--code-bg);
+  }
+  .disc-box h4 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-soft); }
+  .disc-box .row { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .disc-box .tag { font-weight: 600; }
+  .disc-box .tag.pos { color: var(--danger); }
+  .disc-box .tag.neg { color: var(--ok); }
+  .disc-box .tag.neu { color: var(--ink-soft); }
+  .disc-box .hint { margin: 10px 0 0; font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; }
   .pill { display: inline-block; font-size: 12px; padding: 3px 9px; border-radius: 4px; margin: 2px 4px 2px 0; }
   .pill.hi { background: var(--danger-tint); color: var(--danger); }
   .pill.mid { background: var(--warn-tint); color: var(--warn); }
@@ -396,7 +428,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.7</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.8</p>
 </header>
 <main>
   <div class="controls">
@@ -499,50 +531,46 @@ async function cargarResumen() {
         <p class="sub">${minModelo ? ((minModelo.fuente || '') + (minModelo.hora ? ' · @ ' + minModelo.hora : '')) : '—'}</p>
       </div>
     </div>`;
-  let deltaHtml = '';
+  // Discrepancia entre fuentes (modelo − real). No cambia los valores.
+  const disc = d.discrepancia || {};
+  let discRows = '';
   if (maxReal && maxModelo && maxReal.temp_f != null && maxModelo.temp_f != null) {
-    const delta = Math.round((maxModelo.temp_f - maxReal.temp_f) * 10) / 10;
-    const signo = delta >= 0 ? '+' : '';
-    deltaHtml = `<p class="muted" style="margin-top:10px">Modelo max vs real max: <b>${signo}${delta}°F</b></p>`;
+    const dmax = Math.round((Number(maxModelo.temp_f) - Number(maxReal.temp_f)) * 10) / 10;
+    const cls = dmax > 0.3 ? 'pos' : (dmax < -0.3 ? 'neg' : 'neu');
+    const signo = dmax > 0 ? '+' : '';
+    discRows += `<div class="row">Máx <b>MODELO</b> − Máx <b>REAL</b>: <span class="tag ${cls}">${signo}${dmax}°F</span>
+      <span class="muted">(${maxModelo.temp_f} − ${maxReal.temp_f})</span></div>`;
   }
-  if (hw && d.pico_f != null && Number(hw.temp_f) !== Number(d.pico_f)) {
-    deltaHtml += `<p class="muted">WM-6 revisó a la baja: registrado <b>${hw.temp_f}°F</b> → corrida actual <b>${d.pico_f}°F</b></p>`;
+  if (minReal && minModelo && minReal.temp_f != null && minModelo.temp_f != null
+      && Number(minReal.temp_f) !== Number(minModelo.temp_f)) {
+    const dmin = Math.round((Number(minModelo.temp_f) - Number(minReal.temp_f)) * 10) / 10;
+    const cls = dmin > 0.3 ? 'pos' : (dmin < -0.3 ? 'neg' : 'neu');
+    const signo = dmin > 0 ? '+' : '';
+    discRows += `<div class="row">Mín <b>MODELO</b> − Mín <b>REAL</b>: <span class="tag ${cls}">${signo}${dmin}°F</span>
+      <span class="muted">(${minModelo.temp_f} − ${minReal.temp_f})</span></div>`;
   }
+  if (disc.max_lectura) {
+    discRows += `<div class="row muted">${disc.max_lectura}</div>`;
+  }
+  if (!discRows) {
+    discRows = `<div class="row muted">Falta max real o max modelo para calcular diferencia.</div>`;
+  }
+  const discHtml = `
+    <div class="disc-box">
+      <h4>Discrepancia entre fuentes</h4>
+      ${discRows}
+      <p class="hint">REAL = NWS (lo que usa Kalshi). MODELO = techo WM-6 del día.
+      No se modifica ningún valor: solo se muestra cuánto se desvían.</p>
+    </div>`;
   el.innerHTML = `
     <div class="card">
       <h3 style="margin:0 0 4px">${d.city}</h3>
       ${fuenteTxt}
       ${metarHtml}
       ${heroHtml}
-      <div class="grid">
-        <div class="stat"><dt>Ahora</dt><dd>${d.ahora_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Pico WM-6 actual</dt><dd>${d.pico_f ?? '—'}°F</dd></div>
-        <div class="stat"><dt>Promedio</dt><dd>${d.promedio ?? '—'}°F</dd></div>
-      </div>
-      ${deltaHtml}
-      ${pillsHtml ? `<p style="margin-top:16px">${pillsHtml}</p>` : ''}
+      ${discHtml}
     </div>
-    <div class="card" id="edge-card">
-      <h3 style="margin:0 0 4px">Edge Kalshi</h3>
-      <p class="muted" style="margin:0">Cargando…</p>
-    </div>`;
-
-  if (d.fuente === 'windborne') {
-    const re = await fetch(`/api/edge/${ciudadActual}`);
-    const de = await re.json();
-    const cardEdge = document.getElementById('edge-card');
-    if (de.error || !de.tips || de.tips.length === 0) {
-      cardEdge.innerHTML = `<h3 style="margin:0 0 4px">Edge Kalshi</h3><p class="muted" style="margin:0">Sin edge claro por ahora.</p>`;
-    } else {
-      cardEdge.innerHTML = `
-        <h3 style="margin:0 0 4px">Edge Kalshi</h3>
-        <p class="muted" style="margin:0">Pico WM-6: <b>${de.pico_f}°F</b> @ ${de.pico_hora}</p>
-        <ul class="edge-tips">${de.tips.map(t => `<li>${t}</li>`).join('')}</ul>
-        <p class="muted" style="margin:8px 0 0">No es consejo financiero. Cruza con METAR y la corrida del modelo.</p>`;
-    }
-  } else {
-    document.getElementById('edge-card').classList.add('hidden');
-  }
+    <div class="card hidden" id="edge-card"></div>`;
 }
 
 async function cargarGrafico() {

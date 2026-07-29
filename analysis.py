@@ -537,6 +537,13 @@ def msg_resumen(a):
         lineas.append(
             f"Pico Kalshi: <b>{pk['temp_f']}°F</b> — {pk.get('fuente', '')}"
         )
+    # Discrepancia modelo vs real (no cambia valores)
+    if mm and mm.get("temp_f") is not None and hw and hw.get("temp_f") is not None:
+        dmax = round(float(hw["temp_f"]) - float(mm["temp_f"]), 1)
+        signo = "+" if dmax > 0 else ""
+        lineas.append(
+            f"<b>Discrepancia máx</b> (modelo − real): <b>{signo}{dmax}°F</b>"
+        )
     lineas += [
         f"Promedio slots: {a['promedio']}°F · {a['slots_3h']} puntos/3h",
         "",
