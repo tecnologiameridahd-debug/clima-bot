@@ -63,7 +63,7 @@ MIN_INTERVAL = 8  # segundos entre llamadas individuales
 VAR_CACHE_TTL = 900  # 15 min
 STALE_CACHE_TTL = 7200  # 2 h — si 429/cuota, servir caché vieja
 DISK_CACHE_TTL = 7200  # persistir batch en disco
-API_RETRY_DELAYS = [15, 30, 60]
+API_RETRY_DELAYS = [5, 12]  # corto: no quemar el timeout de Render (~90–180s)
 CYCLONE_CACHE_TTL = 1800  # 30 min — ciclones se actualizan cada pocas horas
 
 # Fallback Open-Meteo si WindBorne falla (sin cuota)

@@ -55,7 +55,7 @@ def _error_json(e, status=502):
     return jsonify({"error": str(e)}), status
 
 
-BUILD_VERSION = "v4.3.1-max-modelo"
+BUILD_VERSION = "v4.3.2-max-modelo"
 
 
 @app.get("/health")
@@ -104,14 +104,41 @@ def api_resumen(city_id):
             # Fallback Open-Meteo si WindBorne no responde.
             try:
                 om = resumen_om(city=city)
-                # Aun con fallback, intentar max real NWS (es lo de Kalshi)
-                mm = None
+                # Aun con fallback: max/min real NWS + techo WM-6 registrado
+                mm = mn = None
                 try:
-                    from observations import metar_max_hoy
+                    from observations import metar_extremos_hoy
 
-                    mm = metar_max_hoy(city.get("station"), city["tz"]) if city.get("station") else None
+                    if city.get("station"):
+                        ext = metar_extremos_hoy(city["station"], city["tz"])
+                        if ext:
+                            mm = ext.get("max")
+                            mn = ext.get("min")
+                            if mm:
+                                mm = {
+                                    **mm,
+                                    "station": ext.get("station") or city["station"],
+                                }
+                            if mn:
+                                mn = {
+                                    **mn,
+                                    "station": ext.get("station") or city["station"],
+                                }
                 except Exception:
-                    mm = None
+                    pass
+                fecha = __import__("datetime").datetime.now(city["tz"]).strftime("%Y-%m-%d")
+                hw = None
+                try:
+                    from analysis import pico_wm6_max_hoy
+
+                    hw = pico_wm6_max_hoy(
+                        city["id"],
+                        fecha,
+                        pico_actual=om.get("pico_hoy"),
+                        hora_actual=None,
+                    )
+                except Exception:
+                    pass
                 pico_kalshi = None
                 if mm and mm.get("temp_f") is not None:
                     pico_kalshi = {
@@ -133,6 +160,11 @@ def api_resumen(city_id):
                         "ahora_f": om.get("ahora_f"),
                         "pico_f": om.get("pico_hoy"),
                         "min_f": om.get("min_hoy"),
+                        "pico_wm6_max_hoy": (
+                            {"temp_f": hw["temp_f"], "hora": hw.get("hora")}
+                            if hw and hw.get("temp_f") is not None
+                            else None
+                        ),
                         "pico_kalshi": pico_kalshi,
                         "metar_max_hoy": (
                             {
@@ -141,6 +173,15 @@ def api_resumen(city_id):
                                 "station": mm.get("station"),
                             }
                             if mm and mm.get("temp_f") is not None
+                            else None
+                        ),
+                        "metar_min_hoy": (
+                            {
+                                "temp_f": mn["temp_f"],
+                                "hora": mn.get("hora"),
+                                "station": mn.get("station"),
+                            }
+                            if mn and mn.get("temp_f") is not None
                             else None
                         ),
                     }
@@ -420,7 +461,7 @@ DASHBOARD_HTML = """<!doctype html>
 <body>
 <header>
   <h1>WindBorne Monitor</h1>
-  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.1</p>
+  <p>Kalshi KXHIGH · WeatherMesh-6 + METAR en vivo · build v4.3.2</p>
 </header>
 <main>
   <div class="controls">
