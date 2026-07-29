@@ -266,7 +266,8 @@ def api_resumen(city_id):
         except (TypeError, ValueError):
             om_min = None
 
-    # Highwater WM-6 no baja con OM. OM solo rellena si no hay techo, o si es mayor.
+    # Techo WM-6 siempre gana si existe. Open-Meteo solo rellena cuando
+    # no hay ningún dato de WM-6 (fallback real, no reemplazo).
     max_modelo = None
     max_modelo_fuente = None
     max_modelo_hora = None
@@ -274,27 +275,10 @@ def api_resumen(city_id):
         max_modelo = float(hw["temp_f"])
         max_modelo_fuente = "WM-6 techo registrado"
         max_modelo_hora = hw.get("hora")
-    if om_max is not None:
-        if max_modelo is None:
-            max_modelo = om_max
-            max_modelo_fuente = "Open-Meteo"
-            max_modelo_hora = None
-        elif om_max > max_modelo:
-            max_modelo = om_max
-            max_modelo_fuente = "Open-Meteo (mayor que techo WM-6)"
-            max_modelo_hora = None
-            try:
-                from analysis import pico_wm6_max_hoy
-                from datetime import datetime as _dt
-
-                pico_wm6_max_hoy(
-                    city["id"],
-                    fecha_local,
-                    pico_actual=om_max,
-                    hora_actual="OM",
-                )
-            except Exception:
-                pass
+    elif om_max is not None:
+        max_modelo = om_max
+        max_modelo_fuente = "Open-Meteo (sin datos WM-6)"
+        max_modelo_hora = None
     if max_modelo is not None:
         max_modelo = round(float(max_modelo), 1)
 
